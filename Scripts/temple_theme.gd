@@ -26,12 +26,17 @@ const YELLOW := Color("FFFF55")
 ## for body text. This is the same hue carried up to a legible brightness.
 const AMBER := Color("FFAA55")
 const CYAN := Color("55FFFF")
+const GREEN := Color("55FF55")
+const MAGENTA := Color("FF55FF")
+const BLUE := Color("5555FF")
+const PANEL := Color("0A0A0A")
 
 const FONT_PATH := "res://Assets/IBMPlexMono-Light.ttf"
 
 const SIZE_BODY := 16
-const SIZE_SMALL := 14
-const SIZE_TITLE := 30
+const SIZE_SMALL := 13
+const SIZE_TITLE := 28
+const SIZE_DISPLAY := 22
 
 
 static func build() -> Theme:
@@ -49,6 +54,8 @@ static func build() -> Theme:
 	_style_buttons(theme)
 	_style_inputs(theme)
 	_style_panels(theme)
+	_style_lists(theme)
+	_style_bars(theme)
 
 	return theme
 
@@ -129,10 +136,47 @@ static func _style_inputs(theme: Theme) -> void:
 
 	theme.set_stylebox("normal", "SpinBox", _outline(DARK_GREY, BLACK))
 
+	theme.set_stylebox("normal", "OptionButton", _outline(DARK_GREY, BLACK))
+	theme.set_stylebox("hover", "OptionButton", _outline(YELLOW, BLACK))
+	theme.set_stylebox("pressed", "OptionButton", _solid(YELLOW))
+	theme.set_stylebox("focus", "OptionButton", _outline(YELLOW, BLACK))
+	theme.set_color("font_color", "OptionButton", YELLOW)
+	theme.set_color("font_hover_color", "OptionButton", YELLOW)
+	theme.set_color("font_pressed_color", "OptionButton", BLACK)
+	theme.set_color("font_focus_color", "OptionButton", WHITE)
+
 
 static func _style_panels(theme: Theme) -> void:
-	theme.set_stylebox("panel", "Panel", _outline(BROWN, BLACK))
-	theme.set_stylebox("panel", "PanelContainer", _outline(BROWN, BLACK))
+	theme.set_stylebox("panel", "Panel", _outline(BROWN, PANEL))
+	theme.set_stylebox("panel", "PanelContainer", _outline(BROWN, PANEL))
+	theme.set_stylebox("panel", "PopupMenu", _outline(YELLOW, BLACK))
+	theme.set_color("font_color", "PopupMenu", GREY)
+	theme.set_color("font_hover_color", "PopupMenu", BLACK)
+	theme.set_color("font_accelerator_color", "PopupMenu", MUTED)
+	theme.set_stylebox("hover", "PopupMenu", _solid(YELLOW))
+
+
+static func _style_lists(theme: Theme) -> void:
+	theme.set_stylebox("panel", "ItemList", _outline(DARK_GREY, BLACK))
+	theme.set_stylebox("hovered", "ItemList", _solid(Color("141414")))
+	theme.set_stylebox("selected", "ItemList", _outline(YELLOW, Color("1A1400")))
+	theme.set_stylebox("cursor", "ItemList", _outline(YELLOW, Color(0, 0, 0, 0)))
+	theme.set_color("font_color", "ItemList", GREY)
+	theme.set_color("font_hovered_color", "ItemList", WHITE)
+	theme.set_color("font_selected_color", "ItemList", YELLOW)
+	theme.set_constant("v_separation", "ItemList", 4)
+	theme.set_constant("icon_margin", "ItemList", 8)
+	theme.set_constant("line_separation", "ItemList", 2)
+
+
+static func _style_bars(theme: Theme) -> void:
+	var bg := _outline(DARK_GREY, BLACK)
+	bg.content_margin_top = 2
+	bg.content_margin_bottom = 2
+	theme.set_stylebox("background", "ProgressBar", bg)
+	theme.set_stylebox("fill", "ProgressBar", _solid(YELLOW))
+	theme.set_color("font_color", "ProgressBar", BLACK)
+	theme.set_color("font_outline_color", "ProgressBar", BLACK)
 
 
 static func _outline(border: Color, fill: Color) -> StyleBoxFlat:
@@ -215,3 +259,17 @@ static func button(text: String, on_pressed: Callable) -> Button:
 	b.text = text
 	b.pressed.connect(on_pressed)
 	return b
+
+
+static func header(text: String) -> Label:
+	var label := line(text, YELLOW, SIZE_SMALL)
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	return label
+
+
+static func panel() -> PanelContainer:
+	var p := PanelContainer.new()
+	p.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	p.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	p.clip_contents = true
+	return p

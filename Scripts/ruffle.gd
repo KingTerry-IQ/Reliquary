@@ -87,16 +87,37 @@ func ensure() -> bool:
 	return true
 
 
+## Default player window: 800px on the long side, height from the movie.
+## Resizing Ruffle's wgpu surface is expensive; open already playable.
+const WINDOW_WIDTH := 800
+
+
 func play(swf_path: String, base_dir: String = "") -> int:
 	if exe_path.is_empty() or not FileAccess.file_exists(exe_path):
 		last_error = "Ruffle is not installed yet."
 		return -1
-	if not FileAccess.file_exists(swf_path):
-		last_error = "No SWF at %s." % swf_path
-		return -1
-	var args: PackedStringArray = [ProjectSettings.globalize_path(swf_path)]
+	var movie := swf_path
+	var is_url := movie.begins_with("http://") or movie.begins_with("https://")
+	if not is_url:
+		if not FileAccess.file_exists(swf_path):
+			last_error = "No SWF at %s." % swf_path
+			return -1
+		movie = ProjectSettings.globalize_path(swf_path)
+	var args: PackedStringArray = [
+		movie,
+		"--width",
+		str(WINDOW_WIDTH),
+		"--scale",
+		"show-all",
+		"--force-scale",
+		"--letterbox",
+		"on",
+	]
 	if not base_dir.is_empty():
-		args.append_array(PackedStringArray(["--base", ProjectSettings.globalize_path(base_dir)]))
+		var base := base_dir
+		if not base.begins_with("http://") and not base.begins_with("https://"):
+			base = ProjectSettings.globalize_path(base_dir)
+		args.append_array(PackedStringArray(["--base", base]))
 	_pid = OS.create_process(exe_path, args, false)
 	if _pid == -1:
 		last_error = "Failed to launch Ruffle."

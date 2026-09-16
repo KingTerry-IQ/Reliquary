@@ -7,6 +7,8 @@ extends RefCounted
 const PROTOCOL := "flash-cartridge/1"
 const APP_ROOT := "GodOnChain-KingTerry-FlashCartridge"
 const KINDLED_TABLE := "kindled"
+## Solana lists table seeds as hex(utf-8(name)). "kindled" → this.
+const KINDLED_HEX := "6b696e646c6564"
 const COLUMNS := [
 	"id",
 	"uuid",
@@ -23,6 +25,11 @@ const META_ID := "meta"
 const BLOB_ID := "blob"
 const SETTLE_SECONDS := 2.5
 const SETTLE_TRIES := 8
+
+
+static func is_kindled_table(name: String) -> bool:
+	var n := name.strip_edges().to_lower()
+	return n == KINDLED_TABLE or n == KINDLED_HEX
 
 
 static func table_name(uuid: String) -> String:
@@ -60,6 +67,10 @@ static func staging_path(uuid: String) -> String:
 
 static func cache_dir(table: String) -> String:
 	return "user://cartridges/%s" % table
+
+
+static func trial_dir(uuid: String) -> String:
+	return "user://trials/%s" % uuid.strip_edges()
 
 
 static func meta_row(entry: Dictionary, sha: String, raw_bytes: int) -> Dictionary:
