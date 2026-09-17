@@ -2,6 +2,7 @@ extends Control
 
 const CONFIG_PATH := "user://flash.cfg"
 const APP_NAME := "Reliquary"
+const INSCRIBE_GUIDE := "This game stays permanently accessible."
 const PAGE_SIZE := 400
 const CABINET_PAGE := 80
 const GENRES: PackedStringArray = [
@@ -626,7 +627,7 @@ func _build_footer() -> Control:
 	job_row.add_child(_log_btn)
 
 	_guidance = TempleTheme.line(
-		"There is no unpublish.",
+		INSCRIBE_GUIDE,
 		TempleTheme.AMBER,
 		TempleTheme.SIZE_SMALL
 	)
@@ -1667,7 +1668,7 @@ func _load_size(uuid: String, launch: String = "") -> void:
 		"GameZIP %s\n%s\nTable %s"
 		% [Flashpoint.format_bytes(n), Costs.quote_inscribe(chain, n), Cartridge.table_name(uuid)]
 	)
-	_guidance.text = "There is no unpublish. %s" % Costs.quote_inscribe(chain, n)
+	_guidance.text = "%s %s" % [INSCRIBE_GUIDE, Costs.quote_inscribe(chain, n)]
 
 
 func _load_shot(uuid: String) -> void:
@@ -1741,12 +1742,13 @@ func _on_inscribe() -> void:
 			"GameZIP %s\n%s"
 			% [Flashpoint.format_bytes(_preview_bytes), quote]
 		)
-		_guidance.text = "There is no unpublish. %s" % quote
+		_guidance.text = "%s %s" % [INSCRIBE_GUIDE, quote]
 		_log("%s — %s" % [Flashpoint.format_bytes(_preview_bytes), quote])
 		if not await _confirm(
 			(
-				"There is no unpublish.\n\nGameZIP %s\n%s\n\nInscribe “%s” on %s?"
+				"%s\n\nGameZIP %s\n%s\n\nInscribe “%s” on %s?"
 				% [
+					INSCRIBE_GUIDE,
 					Flashpoint.format_bytes(_preview_bytes),
 					quote,
 					str(entry.get("title", uuid)),
@@ -1790,12 +1792,12 @@ func _on_inscribe() -> void:
 	if _preview_bytes <= 0:
 		var quote := Costs.quote_inscribe(chain, raw_bytes.size())
 		_detail_cost.text = quote
-		_guidance.text = "There is no unpublish. %s" % quote
+		_guidance.text = "%s %s" % [INSCRIBE_GUIDE, quote]
 		_log(quote)
 		if not await _confirm(
 			(
-				"There is no unpublish.\n\n%s\n\nInscribe “%s” on %s?"
-				% [quote, str(entry.get("title", uuid)), chain.to_upper()]
+				"%s\n\n%s\n\nInscribe “%s” on %s?"
+				% [INSCRIBE_GUIDE, quote, str(entry.get("title", uuid)), chain.to_upper()]
 			)
 		):
 			_set_busy(false)
