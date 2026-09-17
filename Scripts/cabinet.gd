@@ -123,7 +123,7 @@ func read_meta(table: String, progress: Callable = Callable()) -> Dictionary:
 	if rows.is_empty():
 		last_error = str(problem[0]) if not problem.is_empty() else "Empty table."
 		return {}
-	var meta := Cartridge.row_of(rows, Cartridge.META_ID)
+	var meta := Cartridge.hydrate_meta(Cartridge.row_of(rows, Cartridge.META_ID))
 	if not meta.is_empty():
 		meta.erase("data")
 		return meta
@@ -143,7 +143,7 @@ func read_game(table: String, progress: Callable = Callable()) -> Dictionary:
 		last_error = str(problem[0]) if not problem.is_empty() else "Empty table."
 		return {}
 	return {
-		"meta": Cartridge.row_of(rows, Cartridge.META_ID),
+		"meta": Cartridge.hydrate_meta(Cartridge.row_of(rows, Cartridge.META_ID)),
 		"blob": Cartridge.row_of(rows, Cartridge.BLOB_ID),
 		"table": table,
 	}

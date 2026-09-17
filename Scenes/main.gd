@@ -27,6 +27,7 @@ const GENRES: PackedStringArray = [
 var iq: IQClient
 var ruffle: Ruffle
 var spr: Spr
+var packs: Packs
 var flashpoint: Flashpoint
 var cabinet: Cabinet
 var shelf := Shelf.new()
@@ -35,6 +36,7 @@ var chain: String = "mon"
 var kindled: bool = false
 var _busy: bool = false
 var _last_progress: int = -1
+var _job_base: String = ""
 var _shot_ticket: int = 0
 var _logo_ticket: int = 0
 var _cabinet_logo_ticket: int = 0
@@ -54,6 +56,7 @@ var _library: OptionButton
 var httpd: LocalHttp
 var fp_host := FlashpointHost.new()
 var _spr_label: Label
+var _nav_label: Label
 var _letter_bar: VBoxContainer
 var _browse_letter: String = ""
 var _letter_buttons: Dictionary = {}
@@ -153,6 +156,8 @@ func _ready() -> void:
 	add_child(ruffle)
 	spr = Spr.new()
 	add_child(spr)
+	packs = Packs.new()
+	add_child(packs)
 	flashpoint = Flashpoint.new()
 	add_child(flashpoint)
 	httpd = LocalHttp.new()
@@ -261,6 +266,8 @@ func _build_topbar() -> Control:
 	_root_label.tooltip_text = "Operator dbRoot on this chain. Inscribe is refused without it."
 	_spr_label = _status_chip(bar, "SPR  …", TempleTheme.AMBER)
 	_spr_label.tooltip_text = "Shockwave projector, fetched on demand."
+	_nav_label = _status_chip(bar, "NAV  …", TempleTheme.AMBER)
+	_nav_label.tooltip_text = "HTML5 / plugin player (Flashpoint Navigator), fetched on demand."
 
 	_chain = OptionButton.new()
 	_chain.add_item("MON", 0)
@@ -811,6 +818,21 @@ func _on_playlist_selected(index: int) -> void:
 	_on_search()
 
 
+func _select_playlist(id: String) -> void:
+	var next := id.strip_edges()
+	if next.is_empty():
+		next = "all"
+	_playlist_id = next
+	if _playlist == null:
+		return
+	_facet_guard = true
+	for i in _playlist.item_count:
+		if str(_playlist.get_item_metadata(i)) == next:
+			_playlist.select(i)
+			break
+	_facet_guard = false
+
+
 func _playlist_title() -> String:
 	if _playlist == null:
 		return "All Games"
@@ -1018,26 +1040,7 @@ func _on_search() -> void:
 	_set_busy(true)
 	var q := _composed_query()
 	if _playlist_id != "all":
-		_set_searching(true, "Loading  %s" % _playlist_title())
-		_log("Playlist %s…" % _playlist_title())
-		_set_job("Fetching %s…" % _playlist_title())
-		var ids: PackedStringArray = await flashpoint.playlist_game_ids(_playlist_id)
-		if ticket != _search_ticket:
-			return
-		if ids.is_empty():
-			_set_searching(false)
-			_set_busy(false)
-			var why := flashpoint.last_error if not flashpoint.last_error.is_empty() else "Playlist was empty."
-			_set_job(why)
-			_log(why)
-			return
-		var hits: Array = await flashpoint.search_ids(ids, func(have: int, total: int) -> void:
-			if ticket == _search_ticket:
-				_set_job("%s  %d / %d" % [_playlist_title(), have, total])
-		)
-		if ticket != _search_ticket:
-			return
-		_show_search_hits(hits)
+		await _load_playlist(ticket)
 		return
 	var limit := 0
 	var library := _library_filter()
@@ -1106,6 +1109,70 @@ func _refresh_catalog_background(library: String) -> void:
 		_show_search_hits(fresh, true)
 		_archive_page = keep
 		_paint_archive_page()
+
+
+func _load_playlist(ticket: int) -> void:
+	var title := _playlist_title()
+	_set_searching(true, "Loading  %s" % title)
+	_log("Playlist %s…" % title)
+	_set_job("Opening %s…" % title)
+	var ids: PackedStringArray = await flashpoint.playlist_game_ids(_playlist_id)
+	if ticket != _search_ticket:
+		return
+	if ids.is_empty():
+		_set_searching(false)
+		_set_busy(false)
+		var why := flashpoint.last_error if not flashpoint.last_error.is_empty() else "Playlist was empty."
+		_set_job(why)
+		_log(why)
+		return
+	var hits: Array = await _playlist_from_catalog(ids, ticket)
+	if ticket != _search_ticket:
+		return
+	var missing: PackedStringArray = Flashpoint.missing_ids(hits, ids)
+	if not missing.is_empty():
+		_set_job("%s  %d / %d" % [title, hits.size(), ids.size()])
+		var fetched: Array = await flashpoint.search_ids(missing, func(have: int, total: int) -> void:
+			if ticket == _search_ticket:
+				_set_job("%s  %d / %d" % [title, hits.size() + have, ids.size()])
+		)
+		if ticket != _search_ticket:
+			return
+		if not fetched.is_empty():
+			hits = Flashpoint.rows_for_ids(hits + fetched, ids)
+	if ticket != _search_ticket:
+		return
+	_show_search_hits(hits)
+
+
+func _playlist_from_catalog(ids: PackedStringArray, ticket: int) -> Array:
+	if not _warm_done and not _warm_lib.is_empty():
+		while not _warm_done:
+			if ticket != _search_ticket:
+				return []
+			await get_tree().process_frame
+	var hits := Flashpoint.rows_for_ids(_warm_rows, ids)
+	if hits.size() >= ids.size():
+		return hits
+	var tried := {}
+	if not _warm_lib.is_empty() and _warm_rows.size() > PAGE_SIZE:
+		tried[_warm_lib] = true
+	for lib in ["arcade", "theatre"]:
+		if tried.has(lib):
+			continue
+		if not flashpoint.has_catalog(lib):
+			continue
+		var extra: Array = await flashpoint.load_catalog_async(lib)
+		tried[lib] = true
+		if extra.is_empty():
+			continue
+		var more := Flashpoint.rows_for_ids(extra, ids)
+		if more.is_empty():
+			continue
+		hits = Flashpoint.rows_for_ids(hits + more, ids)
+		if hits.size() >= ids.size():
+			return hits
+	return hits
 
 
 func _load_all_games(ticket: int, library: String) -> void:
@@ -1615,6 +1682,7 @@ func _search_facet(kind: String, value: String) -> void:
 	_sel_pub = ""
 	_sel_series = ""
 	_sel_tag = ""
+	_select_playlist("all")
 	if _filter_dev:
 		_filter_dev.set_value("")
 	if _filter_pub:
@@ -1704,8 +1772,10 @@ func _refresh_detail_actions() -> void:
 	else:
 		_inscribe_btn.text = "INSCRIBE"
 		_play_btn.text = "TRY"
-	if archive_pick and FlashpointHost.needs_flashpoint(_selected_entry):
-		_play_btn.text = "TRY IN FP"
+	if FlashpointHost.needs_flashpoint(_selected_entry):
+		_play_btn.tooltip_text = "Fetches the plugin runtime, then plays from this cartridge."
+	else:
+		_play_btn.tooltip_text = ""
 	var cached := not _selected_table.is_empty() and Cartridge.has_play_cache(_selected_table)
 	if _drop_btn:
 		_drop_btn.visible = cached
@@ -1893,9 +1963,6 @@ func _trial_play(entry: Dictionary) -> void:
 	if uuid.is_empty():
 		_log("Entry has no id.")
 		return
-	if FlashpointHost.needs_flashpoint(entry):
-		_launch_via_flashpoint(entry, true)
-		return
 	_set_busy(true)
 	_last_progress = -1
 	if ruffle.exe_path.is_empty() and not FlashpointHost.needs_shockwave(entry):
@@ -1984,6 +2051,16 @@ func _refresh_spr_chip() -> void:
 		)
 	else:
 		TempleTheme.paint_chip(_spr_label, "SPR  —", TempleTheme.AMBER)
+	_refresh_nav_chip()
+
+
+func _refresh_nav_chip() -> void:
+	if _nav_label == null:
+		return
+	if packs != null and packs.has_navigator():
+		TempleTheme.paint_chip(_nav_label, "NAV  OK", TempleTheme.GREEN)
+	else:
+		TempleTheme.paint_chip(_nav_label, "NAV  —", TempleTheme.AMBER)
 
 
 func _launch_via_flashpoint(entry: Dictionary, trial: bool) -> bool:
@@ -1991,9 +2068,11 @@ func _launch_via_flashpoint(entry: Dictionary, trial: bool) -> bool:
 	if uuid.is_empty():
 		return false
 	if fp_host.clifp().is_empty():
-		if not fp_host.autodetect():
-			_log("That platform still needs a Flashpoint install (Unity/Java). Shockwave uses auto-fetched SPR.")
-			_set_job("No Flashpoint install for this platform.")
+		fp_host.autodetect()
+	if fp_host.clifp().is_empty():
+		if not await _pick_flashpoint_root():
+			_set_job("Needs a Flashpoint folder.")
+			_log("Pick the Flashpoint folder to play this.")
 			return true
 	var pid := fp_host.play_id(uuid)
 	if pid == -1:
@@ -2004,6 +2083,227 @@ func _launch_via_flashpoint(entry: Dictionary, trial: bool) -> bool:
 	_set_job("%s via Flashpoint." % tag)
 	_log("%s CLIFp pid %d — %s" % [tag, pid, uuid])
 	return true
+
+
+func _pick_flashpoint_root() -> bool:
+	var state := {"done": false, "ok": false, "path": ""}
+	var err := DisplayServer.file_dialog_show(
+		"Flashpoint folder",
+		OS.get_environment("USERPROFILE"),
+		"",
+		false,
+		DisplayServer.FILE_DIALOG_MODE_OPEN_DIR,
+		PackedStringArray(),
+		func(status: bool, paths: PackedStringArray, _filter: int) -> void:
+			state.ok = status
+			if status and paths.size() > 0:
+				state.path = str(paths[0])
+			state.done = true
+	)
+	if err != OK:
+		return false
+	while not bool(state.done):
+		await get_tree().process_frame
+	var path := str(state.path).strip_edges()
+	if not bool(state.ok) or path.is_empty():
+		return false
+	if not fp_host.set_root(path):
+		_log(fp_host.last_error)
+		return false
+	_save_config()
+	return true
+
+
+func _launch_via_browser(
+	dest: String,
+	meta: Dictionary,
+	trial: bool,
+	file: String,
+	inject_ruffle: bool
+) -> void:
+	await _launch_via_local_html(dest, meta, trial, file, inject_ruffle)
+
+
+func _http_movie(launch: String, file: String, dest: String = "") -> String:
+	if not dest.is_empty():
+		var resolved := Unzip.resolved_movie(dest, launch)
+		if not resolved.is_empty():
+			return resolved
+	var movie := Unzip.movie_url(launch)
+	if movie.begins_with("https://") or movie.begins_with("ftp://"):
+		return "http://" + movie.substr(movie.find("://") + 3)
+	if movie.begins_with("http://"):
+		return movie
+	var rel := Unzip.path_from_launch(launch)
+	if rel.is_empty() and not file.is_empty():
+		rel = file.get_file()
+	return "http://" + rel if not rel.is_empty() else ""
+
+
+func _serve_root(dest: String) -> String:
+	var dest_abs := ProjectSettings.globalize_path(dest)
+	if DirAccess.dir_exists_absolute(dest_abs.path_join("content")):
+		return dest_abs.path_join("content")
+	return dest_abs
+
+
+func _launch_via_local_html(
+	dest: String,
+	meta: Dictionary,
+	trial: bool,
+	file: String,
+	inject_ruffle: bool
+) -> void:
+	var launch := str(meta.get("launch", meta.get("launchCommand", "")))
+	var original := Unzip.resolved_movie(dest, launch)
+	if original.is_empty():
+		original = Unzip.movie_url(launch)
+		if original.begins_with("https://"):
+			original = "http://" + original.substr(8)
+	var use_proxy := original.begins_with("http://")
+	var web := ruffle.web_dir() if inject_ruffle and ruffle.has_web() else ""
+	var port := httpd.serve(_serve_root(dest), 18765, Flashpoint.LEGACY_HTDOCS, web, not use_proxy)
+	if port < 0:
+		_set_busy(false)
+		_set_job("Could not start local HTTP.")
+		_log("Could not start local HTTP.")
+		return
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var tag := "Trial" if trial else "Play"
+	if use_proxy:
+		var pid := httpd.open_proxied(original)
+		if pid != -1:
+			_set_busy(false)
+			_set_job("%s locally (%s)%s." % [tag, Flashpoint.platform_label(meta), " — not inscribed" if trial else ""])
+			_log("%s origin %s proxy %d" % [tag, original, port])
+			return
+		port = httpd.serve(_serve_root(dest), 18765, Flashpoint.LEGACY_HTDOCS, web, true)
+		if port < 0:
+			_set_busy(false)
+			_set_job("Could not start local HTTP.")
+			return
+	var rel := Unzip.resolved_rel(dest, launch)
+	if rel.is_empty():
+		rel = Unzip.path_from_launch(launch)
+	if rel.is_empty() and not file.is_empty():
+		rel = _rel_under(_serve_root(dest), file)
+		if rel.is_empty():
+			rel = file.get_file()
+	var url := httpd.url_for(rel)
+	OS.shell_open(url)
+	_set_busy(false)
+	_set_job("%s locally (%s)%s." % [tag, Flashpoint.platform_label(meta), " — not inscribed" if trial else ""])
+	_log("%s local %s" % [tag, url])
+
+
+func _launch_via_navigator(
+	dest: String,
+	meta: Dictionary,
+	trial: bool,
+	_file: String,
+	_inject_ruffle: bool,
+	_plugin: bool
+) -> void:
+	TempleTheme.paint_chip(_nav_label, "NAV  …", TempleTheme.AMBER)
+	var ok := await packs.ensure_for(
+		meta,
+		_on_progress,
+		func(label: String) -> void: _set_job(label)
+	)
+	_refresh_nav_chip()
+	if not ok:
+		_log(packs.last_error)
+		_set_busy(false)
+		await _launch_via_flashpoint(meta, trial)
+		return
+	var launch := str(meta.get("launch", meta.get("launchCommand", "")))
+	var port := httpd.serve(_serve_root(dest), LocalHttp.PLUGIN_PORT, Flashpoint.LEGACY_HTDOCS)
+	if port < 0:
+		_set_busy(false)
+		_set_job("Could not start local HTTP.")
+		return
+	var rel := Unzip.resolved_rel(dest, launch)
+	if rel.is_empty():
+		rel = Unzip.path_from_launch(launch)
+	var original := Unzip.resolved_movie(dest, launch)
+	var local_movie := (
+		httpd.url_for(rel, "localhost")
+		if not rel.is_empty()
+		else _http_movie(launch, "", dest)
+	)
+	if local_movie.is_empty() and original.is_empty():
+		_set_busy(false)
+		_set_job("No launch URL.")
+		return
+	var pid := packs.play_app(meta, local_movie, original)
+	_set_busy(false)
+	var tag := "Trial" if trial else "Play"
+	if pid == -1:
+		_set_job(packs.last_error)
+		_log("Play failed: %s" % packs.last_error)
+	else:
+		_set_job("%s (%s)%s." % [tag, Flashpoint.platform_label(meta), " — not inscribed" if trial else ""])
+		_log("%s pid %d — %s" % [tag, pid, local_movie if not local_movie.is_empty() else original])
+
+
+func _launch_via_ruffle(dest: String, meta: Dictionary, trial: bool, file: String) -> void:
+	var launch := str(meta.get("launch", meta.get("launchCommand", "")))
+	var dest_abs := ProjectSettings.globalize_path(dest)
+	var serve_root := dest_abs
+	if DirAccess.dir_exists_absolute(dest_abs.path_join("content")):
+		serve_root = dest_abs.path_join("content")
+	var port := httpd.serve(serve_root, 18765, Flashpoint.LEGACY_HTDOCS)
+	if port < 0:
+		_set_busy(false)
+		_set_job("Could not start local HTTP.")
+		_log("Could not start local HTTP for Ruffle.")
+		return
+	var movie := Unzip.resolved_movie(dest, launch)
+	if movie.is_empty() or (not movie.to_lower().contains(".swf") and file.to_lower().ends_with(".swf")):
+		var rel_swf := Unzip.resolved_rel(dest, launch)
+		if rel_swf.is_empty():
+			rel_swf = _rel_under(serve_root, file)
+		if rel_swf.is_empty():
+			_set_busy(false)
+			var pid := ruffle.play(file)
+			_finish_ruffle(pid, trial, file)
+			return
+		movie = "http://" + rel_swf
+	if movie.begins_with("https://") or movie.begins_with("ftp://"):
+		movie = "http://" + movie.substr(movie.find("://") + 3)
+	elif not movie.begins_with("http://"):
+		var rel := Unzip.resolved_rel(dest, launch)
+		if rel.is_empty():
+			rel = Unzip.path_from_launch(launch)
+		if rel.is_empty():
+			_set_busy(false)
+			var pid := ruffle.play(file)
+			_finish_ruffle(pid, trial, file)
+			return
+		movie = "http://" + rel
+	var proxy := "http://127.0.0.1:%d" % port
+	var pid := ruffle.play(movie, "", proxy, movie)
+	_set_busy(false)
+	_finish_ruffle(pid, trial, movie)
+
+
+func _rel_under(root: String, path: String) -> String:
+	var a := ProjectSettings.globalize_path(root).replace("\\", "/").rstrip("/")
+	var b := ProjectSettings.globalize_path(path).replace("\\", "/")
+	if b.begins_with(a + "/"):
+		return b.substr(a.length() + 1)
+	return ""
+
+
+func _finish_ruffle(pid: int, trial: bool, movie: String) -> void:
+	var tag := "Trial" if trial else "Play"
+	if pid == -1:
+		_set_job(ruffle.last_error)
+		_log("Play failed: %s" % ruffle.last_error)
+	else:
+		_set_job("%s in Ruffle%s." % [tag, " — not inscribed" if trial else ""])
+		_log("%s Ruffle pid %d — %s" % [tag, pid, movie.get_file() if not movie.begins_with("http") else movie])
 
 
 func _launch_via_spr(dest: String, meta: Dictionary, trial: bool) -> void:
@@ -2017,7 +2317,7 @@ func _launch_via_spr(dest: String, meta: Dictionary, trial: bool) -> void:
 			fp_host.autodetect()
 		if not fp_host.clifp().is_empty():
 			_set_busy(false)
-			_launch_via_flashpoint(meta, trial)
+			await _launch_via_flashpoint(meta, trial)
 			return
 		_set_busy(false)
 		_set_job(spr.last_error)
@@ -2033,17 +2333,19 @@ func _launch_via_spr(dest: String, meta: Dictionary, trial: bool) -> void:
 		_set_job("Could not start local HTTP.")
 		_log("Could not start local HTTP for SPR.")
 		return
-	var pj := Spr.projector_folder(str(meta.get("applicationPath", "")))
+	var pj := Spr.projector_for(meta)
 	if not spr.configure_proxy(port, pj):
 		_set_busy(false)
 		_set_job(spr.last_error)
 		_log(spr.last_error)
 		return
-	var movie := Unzip.movie_url(launch)
+	var movie := Unzip.resolved_movie(dest, launch)
 	if movie.begins_with("https://"):
 		movie = "http://" + movie.substr(8)
 	elif not movie.begins_with("http://") and not movie.begins_with("ftp://"):
-		var rel := Unzip.path_from_launch(launch)
+		var rel := Unzip.resolved_rel(dest, launch)
+		if rel.is_empty():
+			rel = Unzip.path_from_launch(launch)
 		if rel.is_empty():
 			_set_busy(false)
 			_set_job("No launch URL for SPR.")
@@ -2067,54 +2369,40 @@ func _launch_entry(dest: String, meta: Dictionary, trial: bool) -> void:
 		await _launch_via_spr(dest, meta, trial)
 		return
 	if FlashpointHost.needs_flashpoint(meta):
-		_set_busy(false)
-		_launch_via_flashpoint(meta, trial)
+		await _launch_via_navigator(dest, meta, trial, "", false, true)
 		return
 	var file := Unzip.file_for_launch(dest, launch)
-	if file.is_empty():
+	var swf := Unzip.swf_for_launch(dest, launch)
+	if file.is_empty() and swf.is_empty():
 		_set_busy(false)
 		_set_job("No launch file in that cartridge.")
 		_log("No launch file in that cartridge.")
 		return
-	var tag := "Trial" if trial else "Play"
-	if Flashpoint.uses_ruffle(meta) or file.to_lower().ends_with(".swf"):
-		var dest_abs := ProjectSettings.globalize_path(dest)
-		var has_content := DirAccess.dir_exists_absolute(dest_abs.path_join("content"))
-		var pid := -1
-		if has_content:
-			pid = ruffle.play(file, dest)
-		else:
-			var port := httpd.serve(dest_abs, 18765, Flashpoint.LEGACY_HTDOCS)
-			if port < 0:
-				_set_busy(false)
-				_set_job("Could not start local HTTP.")
+	var html_launch := (
+		Flashpoint.uses_browser(meta)
+		or (not file.is_empty() and file.get_extension().to_lower() in ["html", "htm"])
+		or launch.to_lower().find(".html") >= 0
+		or launch.to_lower().find(".htm") >= 0
+	)
+	if html_launch:
+		var flash_html := str(meta.get("platform", "")).to_lower().find("flash") >= 0
+		if flash_html:
+			if ruffle.exe_path.is_empty() or not ruffle.has_web():
+				await ruffle.ensure()
+			if ruffle.has_web():
+				await _launch_via_local_html(dest, meta, trial, file, true)
 				return
-			var rel := Unzip.path_from_launch(launch)
-			pid = ruffle.play(httpd.url_for(rel), "http://127.0.0.1:%d/" % port)
-		_set_busy(false)
-		if pid == -1:
-			_set_job(ruffle.last_error)
-			_log("Play failed: %s" % ruffle.last_error)
-		else:
-			_set_job("%s in Ruffle%s." % [tag, " — not inscribed" if trial else ""])
-			_log("%s Ruffle pid %d — %s" % [tag, pid, file.get_file()])
+			if not swf.is_empty():
+				_launch_via_ruffle(dest, meta, trial, swf)
+				return
+		await _launch_via_local_html(dest, meta, trial, file, false)
 		return
-	if Flashpoint.uses_browser(meta) or file.get_extension().to_lower() in ["html", "htm"]:
-		var dest_abs := ProjectSettings.globalize_path(dest)
-		var remote := "" if DirAccess.dir_exists_absolute(dest_abs.path_join("content")) else Flashpoint.LEGACY_HTDOCS
-		var port := httpd.serve(file.get_base_dir(), 18765, remote)
-		_set_busy(false)
-		if port < 0:
-			_set_job("Could not start local HTTP.")
-			_log("Could not start local HTTP.")
-			return
-		var url := httpd.url_for(file.get_file())
-		OS.shell_open(url)
-		_set_job("%s in browser (%s)%s." % [tag, Flashpoint.platform_label(meta), " — not inscribed" if trial else ""])
-		_log("%s browser %s" % [tag, url])
+	if Flashpoint.uses_ruffle(meta) or not swf.is_empty() or (not file.is_empty() and file.to_lower().ends_with(".swf")):
+		_launch_via_ruffle(dest, meta, trial, swf if not swf.is_empty() else file)
 		return
 	_set_busy(false)
 	OS.shell_open(file)
+	var tag := "Trial" if trial else "Play"
 	_set_job("%s via system open (%s)." % [tag, Flashpoint.platform_label(meta)])
 	_log("%s opened %s" % [tag, file])
 
@@ -2406,11 +2694,14 @@ func _badge_archive_from_map() -> void:
 
 func _on_progress(value: float) -> void:
 	_progress.value = value
-	var step := int(value / 10.0) * 10
-	if step == _last_progress:
+	var pct := int(value)
+	if pct == _last_progress:
 		return
-	_last_progress = step
-	_job.text = "%d%%" % step
+	_last_progress = pct
+	if _job_base.is_empty():
+		_job.text = "%d%%" % pct
+	else:
+		_job.text = "%s  %d%%" % [_job_base, pct]
 
 
 func _set_searching(on: bool, message: String = "LOADING…") -> void:
@@ -2448,6 +2739,8 @@ func _process(dt: float) -> void:
 
 
 func _set_job(text: String) -> void:
+	_job_base = text
+	_last_progress = -1
 	_job.text = text
 	if not _busy and not _searching:
 		_progress.value = 0

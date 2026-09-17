@@ -126,6 +126,16 @@ static func projector_folder(application_path: String) -> String:
 	return DEFAULT_PJ
 
 
+static func projector_for(entry: Dictionary) -> String:
+	var from_app := projector_folder(str(entry.get("applicationPath", "")))
+	if from_app != DEFAULT_PJ:
+		return from_app
+	var from_launch := projector_folder(str(entry.get("launch", entry.get("launchCommand", ""))))
+	if from_launch != DEFAULT_PJ:
+		return from_launch
+	return from_app
+
+
 func exe_for(pj: String = DEFAULT_PJ) -> String:
 	return _find_exe(_pack_root(), pj)
 
@@ -203,7 +213,7 @@ func play(movie: String, extra: PackedStringArray = PackedStringArray(), pj: Str
 	var args := PackedStringArray([movie])
 	args.append_array(extra)
 	if OS.get_name() == "Windows":
-		_pid = _launch_shown(exe, args)
+		_pid = launch_shown(exe, args)
 	else:
 		_pid = OS.create_process(exe, args, false)
 	if _pid == -1:
@@ -211,7 +221,8 @@ func play(movie: String, extra: PackedStringArray = PackedStringArray(), pj: Str
 	return _pid
 
 
-func _launch_shown(exe: String, args: PackedStringArray) -> int:
+## Godot create_process uses CREATE_NO_WINDOW; raise a normal player window.
+static func launch_shown(exe: String, args: PackedStringArray, work_dir: String = "") -> int:
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://bin"))
 	var script_res := "user://bin/spr_launch.ps1"
 	var args_res := "user://bin/spr-args.json"
@@ -227,7 +238,7 @@ func _launch_shown(exe: String, args: PackedStringArray) -> int:
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(pid_res))
 	var script_abs := ProjectSettings.globalize_path(script_res).replace("/", "\\")
 	var exe_abs := exe.replace("/", "\\")
-	var cwd := exe.get_base_dir().replace("/", "\\")
+	var cwd := (work_dir if not work_dir.is_empty() else exe.get_base_dir()).replace("/", "\\")
 	var pid_abs := ProjectSettings.globalize_path(pid_res).replace("/", "\\")
 	var args_abs := ProjectSettings.globalize_path(args_res).replace("/", "\\")
 	var helper := OS.create_process("powershell.exe", PackedStringArray([
@@ -258,7 +269,7 @@ func _launch_shown(exe: String, args: PackedStringArray) -> int:
 	return OS.create_process(exe, args, false)
 
 
-func _read_pid_file(path: String) -> int:
+static func _read_pid_file(path: String) -> int:
 	if not FileAccess.file_exists(path):
 		return -1
 	var file := FileAccess.open(path, FileAccess.READ)
@@ -271,7 +282,7 @@ func _read_pid_file(path: String) -> int:
 	return -1
 
 
-func _write_text(path: String, text: String) -> bool:
+static func _write_text(path: String, text: String) -> bool:
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if file == null:
 		return false

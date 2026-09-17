@@ -105,14 +105,31 @@ static func needs_shockwave(entry: Dictionary) -> bool:
 
 
 ## Platforms that still need a full Flashpoint install (CLIFp). Shockwave uses
-## auto-fetched SPR.exe instead.
+## auto-fetched SPR.exe instead. Unity Web Player is still plugin HTML.
 static func needs_flashpoint(entry: Dictionary) -> bool:
 	if needs_shockwave(entry):
 		return false
 	var launch := str(entry.get("launch", entry.get("launchCommand", ""))).to_lower()
 	var plat := str(entry.get("platform", "")).to_lower()
-	if plat.find("unity") >= 0 and launch.find(".html") < 0:
+	var app := str(entry.get("applicationPath", "")).to_lower()
+	if plat.find("unity") >= 0 or app.find("startunity") >= 0:
 		return true
-	if plat.find("java") >= 0:
+	if plat.find("java") >= 0 or app.find("startjava") >= 0:
+		return true
+	if plat.find("silverlight") >= 0:
+		return true
+	if plat.find("authorware") >= 0:
+		return true
+	if plat.find("3dvia") >= 0 or plat.find("popcap") >= 0:
+		return true
+	if plat.find("shiva") >= 0 or plat.find("pulse") >= 0:
+		return true
+	if plat.find("activex") >= 0 or app.find("startactivex") >= 0:
+		return true
+	if plat.find("viscape") >= 0 or plat.find("vrml") >= 0:
+		return true
+	if app.find("secureplayer") >= 0 or app.find("startcosmo") >= 0:
+		return true
+	if launch.begins_with("shiva3d") or launch.begins_with("pulse ") or launch.begins_with("svr "):
 		return true
 	return false

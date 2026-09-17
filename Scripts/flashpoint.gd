@@ -111,6 +111,49 @@ func search_ids(ids: PackedStringArray, progress: Callable = Callable()) -> Arra
 	return out
 
 
+## Pull playlist rows out of a local catalog dump, in playlist order.
+static func rows_for_ids(rows: Array, ids: PackedStringArray) -> Array:
+	if ids.is_empty() or rows.is_empty():
+		return []
+	var by_id := {}
+	for entry: Variant in rows:
+		if not entry is Dictionary:
+			continue
+		var rec: Dictionary = entry
+		var id := str(rec.get("id", "")).strip_edges()
+		if id.is_empty() or by_id.has(id):
+			continue
+		by_id[id] = rec
+	var out: Array = []
+	var seen := {}
+	for raw in ids:
+		var id := raw.strip_edges()
+		if id.is_empty() or seen.has(id) or not by_id.has(id):
+			continue
+		seen[id] = true
+		out.append(by_id[id])
+	return out
+
+
+static func missing_ids(rows: Array, ids: PackedStringArray) -> PackedStringArray:
+	var have := {}
+	for entry: Variant in rows:
+		if not entry is Dictionary:
+			continue
+		var id := str((entry as Dictionary).get("id", "")).strip_edges()
+		if not id.is_empty():
+			have[id] = true
+	var out := PackedStringArray()
+	var seen := {}
+	for raw in ids:
+		var id := raw.strip_edges()
+		if id.is_empty() or seen.has(id) or have.has(id):
+			continue
+		seen[id] = true
+		out.append(id)
+	return out
+
+
 func _request_search(fields: Dictionary, limit: int = 0, any: bool = false, field_list: String = "") -> Array:
 	last_error = ""
 	var parts: PackedStringArray = []
@@ -532,7 +575,14 @@ func is_gamezip(entry: Dictionary) -> bool:
 func playable_here(entry: Dictionary) -> bool:
 	if is_gamezip(entry):
 		return true
-	return not Unzip.path_from_launch(str(entry.get("launchCommand", ""))).is_empty()
+	return not Unzip.path_from_launch(launch_of(entry)).is_empty()
+
+
+static func launch_of(entry: Dictionary) -> String:
+	var cmd := str(entry.get("launchCommand", "")).strip_edges()
+	if not cmd.is_empty():
+		return cmd
+	return str(entry.get("launch", "")).strip_edges()
 
 
 static func platform_label(entry: Dictionary) -> String:
@@ -543,19 +593,21 @@ static func platform_label(entry: Dictionary) -> String:
 
 
 static func uses_ruffle(entry: Dictionary) -> bool:
-	var launch := str(entry.get("launchCommand", "")).to_lower()
+	var launch := launch_of(entry).to_lower()
 	if launch.find(".swf") >= 0:
 		return true
 	var plat := str(entry.get("platform", "")).to_lower()
-	return plat.find("flash") >= 0 and launch.find(".html") < 0
+	return plat.find("flash") >= 0 and launch.find(".html") < 0 and launch.find(".htm") < 0
 
 
 static func uses_browser(entry: Dictionary) -> bool:
-	var launch := str(entry.get("launchCommand", "")).to_lower()
+	if FlashpointHost.needs_flashpoint(entry) or FlashpointHost.needs_shockwave(entry):
+		return false
+	var launch := launch_of(entry).to_lower()
 	var plat := str(entry.get("platform", "")).to_lower()
 	if launch.find(".html") >= 0 or launch.find(".htm") >= 0:
 		return true
-	return plat.find("html") >= 0 or plat.find("unity") >= 0 or plat.find("silverlight") >= 0
+	return plat.find("html") >= 0
 
 
 func fetch_tags() -> PackedStringArray:
@@ -628,16 +680,32 @@ static func parse_playlist_ids(parsed: Variant) -> PackedStringArray:
 	var out := PackedStringArray()
 	var seen := {}
 	for row: Variant in games:
-		var gid := ""
-		if row is Dictionary:
-			gid = str((row as Dictionary).get("id", (row as Dictionary).get("gameId", ""))).strip_edges()
-		else:
-			gid = str(row).strip_edges()
+		var gid := _playlist_entry_game_id(row)
 		if gid.is_empty() or seen.has(gid):
 			continue
 		seen[gid] = true
 		out.append(gid)
 	return out
+
+
+## PlaylistGame.id is the row index; gameId is the catalog UUID.
+static func _playlist_entry_game_id(row: Variant) -> String:
+	if row is Dictionary:
+		var rec: Dictionary = row
+		var gid := _catalog_id_text(rec.get("gameId", null))
+		if gid.is_empty():
+			gid = _catalog_id_text(rec.get("id", null))
+		return gid
+	return _catalog_id_text(row)
+
+
+static func _catalog_id_text(raw: Variant) -> String:
+	if raw == null:
+		return ""
+	var t := typeof(raw)
+	if t == TYPE_INT or t == TYPE_FLOAT:
+		return ""
+	return str(raw).strip_edges()
 
 
 func _ids_from_playlist_zip(zip_path: String) -> PackedStringArray:

@@ -6,6 +6,8 @@ extends Node
 
 const VERSION_PATH := "user://bin/ruffle/VERSION"
 const BIN_ROOT := "user://bin/ruffle"
+const WEB_ROOT := "user://bin/ruffle-web"
+const WEB_VERSION_PATH := "user://bin/ruffle-web/VERSION"
 const GITHUB_LATEST := "https://api.github.com/repos/ruffle-rs/ruffle/releases/latest"
 const UA := "Reliquary/0.1 (GodOnChain; Ruffle fetch)"
 
@@ -55,11 +57,13 @@ func ensure() -> bool:
 
 	if latest == installed and FileAccess.file_exists(exe_path):
 		tag = latest
+		await _ensure_web(release, latest)
 		return true
 
 	var url := _asset_url(release)
 	if url.is_empty():
 		last_error = "No Ruffle asset for this OS in %s." % latest
+		await _ensure_web(release, latest)
 		return not exe_path.is_empty()
 
 	var archive := "user://bin/ruffle-download"
@@ -67,16 +71,19 @@ func ensure() -> bool:
 	archive += ".zip" if suffix.ends_with(".zip") else ".tar.gz"
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://bin"))
 	if not await _download(url, archive):
+		await _ensure_web(release, latest)
 		return not exe_path.is_empty()
 
 	var dest := "%s/%s" % [BIN_ROOT, latest]
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dest))
 	if not _extract(archive, dest):
+		await _ensure_web(release, latest)
 		return not exe_path.is_empty()
 
 	var found := exe_for(latest)
 	if found.is_empty() or not FileAccess.file_exists(found):
 		last_error = "Extracted Ruffle but could not find the executable."
+		await _ensure_web(release, latest)
 		return not exe_path.is_empty()
 
 	_write_version(latest)
@@ -84,7 +91,90 @@ func ensure() -> bool:
 		_remove_dir("%s/%s" % [BIN_ROOT, installed])
 	tag = latest
 	exe_path = found
+	await _ensure_web(release, latest)
 	return true
+
+
+func has_web() -> bool:
+	return FileAccess.file_exists(web_js())
+
+
+func web_dir() -> String:
+	return ProjectSettings.globalize_path(WEB_ROOT)
+
+
+func web_js() -> String:
+	return _find_named(web_dir(), "ruffle.js")
+
+
+func _ensure_web(release: Dictionary, latest: String) -> void:
+	if has_web() and _web_tag() == latest:
+		return
+	var url := _named_asset_url(release, "web-selfhosted.zip")
+	if url.is_empty():
+		return
+	DirAccess.make_dir_recursive_absolute(web_dir())
+	var archive := "user://bin/ruffle-web-download.zip"
+	if not await _download(url, archive):
+		return
+	if not _extract(archive, WEB_ROOT):
+		return
+	if has_web():
+		_write_text(WEB_VERSION_PATH, latest)
+
+
+func _web_tag() -> String:
+	if not FileAccess.file_exists(WEB_VERSION_PATH):
+		return ""
+	var file := FileAccess.open(WEB_VERSION_PATH, FileAccess.READ)
+	if file == null:
+		return ""
+	var text := file.get_as_text().strip_edges()
+	file.close()
+	return text
+
+
+func _named_asset_url(release: Dictionary, want: String) -> String:
+	var assets: Variant = release.get("assets", [])
+	if assets is Array:
+		for asset: Variant in assets:
+			if asset is Dictionary:
+				var name := str((asset as Dictionary).get("name", ""))
+				if name.ends_with(want) or name.find(want) >= 0:
+					return str((asset as Dictionary).get("browser_download_url", ""))
+	return ""
+
+
+func _find_named(dir: String, filename: String) -> String:
+	var want := filename.to_lower()
+	var d := DirAccess.open(dir)
+	if d == null:
+		return ""
+	d.list_dir_begin()
+	var fname := d.get_next()
+	var nested: PackedStringArray = []
+	while fname != "":
+		var full := dir.path_join(fname)
+		if d.current_is_dir() and not fname.begins_with("."):
+			nested.append(full)
+		elif fname.to_lower() == want:
+			d.list_dir_end()
+			return full
+		fname = d.get_next()
+	d.list_dir_end()
+	for sub in nested:
+		var hit := _find_named(sub, filename)
+		if not hit.is_empty():
+			return hit
+	return ""
+
+
+func _write_text(path: String, text: String) -> void:
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_string(text)
+	file.close()
 
 
 ## Default player window: 800px on the long side, height from the movie.
@@ -92,17 +182,29 @@ func ensure() -> bool:
 const WINDOW_WIDTH := 800
 
 
-func play(swf_path: String, base_dir: String = "") -> int:
-	if exe_path.is_empty() or not FileAccess.file_exists(exe_path):
-		last_error = "Ruffle is not installed yet."
-		return -1
+static func save_dir() -> String:
+	var p := ProjectSettings.globalize_path("user://saves/ruffle")
+	DirAccess.make_dir_recursive_absolute(p)
+	if OS.get_name() == "Windows":
+		p = p.replace("/", "\\")
+	return p
+
+
+static func cli_args(
+	swf_path: String,
+	base_dir: String = "",
+	proxy: String = "",
+	spoof_url: String = "",
+	save_directory: String = ""
+) -> PackedStringArray:
 	var movie := swf_path
-	var is_url := movie.begins_with("http://") or movie.begins_with("https://")
-	if not is_url:
-		if not FileAccess.file_exists(swf_path):
-			last_error = "No SWF at %s." % swf_path
-			return -1
-		movie = ProjectSettings.globalize_path(swf_path)
+	var is_url := (
+		movie.begins_with("http://")
+		or movie.begins_with("https://")
+		or movie.begins_with("ftp://")
+	)
+	if is_url:
+		movie = Unzip.encode_launch_url(movie)
 	var args: PackedStringArray = [
 		movie,
 		"--width",
@@ -115,10 +217,45 @@ func play(swf_path: String, base_dir: String = "") -> int:
 	]
 	if not base_dir.is_empty():
 		var base := base_dir
-		if not base.begins_with("http://") and not base.begins_with("https://"):
+		if not base.begins_with("http://") and not base.begins_with("https://") and not base.begins_with("ftp://"):
 			base = ProjectSettings.globalize_path(base_dir)
+		else:
+			base = Unzip.encode_launch_url(base)
 		args.append_array(PackedStringArray(["--base", base]))
-	_pid = OS.create_process(exe_path, args, false)
+	if not proxy.is_empty():
+		args.append_array(PackedStringArray(["--proxy", proxy]))
+	if not spoof_url.is_empty():
+		args.append_array(PackedStringArray(["--spoof-url", Unzip.encode_launch_url(spoof_url)]))
+	if not save_directory.is_empty():
+		args.append_array(PackedStringArray(["--storage", "disk", "--save-directory", save_directory]))
+	return args
+
+
+func play(
+	swf_path: String,
+	base_dir: String = "",
+	proxy: String = "",
+	spoof_url: String = ""
+) -> int:
+	if exe_path.is_empty() or not FileAccess.file_exists(exe_path):
+		last_error = "Ruffle is not installed yet."
+		return -1
+	var movie := swf_path
+	var is_url := (
+		movie.begins_with("http://")
+		or movie.begins_with("https://")
+		or movie.begins_with("ftp://")
+	)
+	if not is_url:
+		if not FileAccess.file_exists(swf_path):
+			last_error = "No SWF at %s." % swf_path
+			return -1
+		movie = ProjectSettings.globalize_path(swf_path)
+	var args := cli_args(movie, base_dir, proxy, spoof_url, save_dir())
+	if OS.get_name() == "Windows":
+		_pid = Spr.launch_shown(exe_path, args)
+	else:
+		_pid = OS.create_process(exe_path, args, false)
 	if _pid == -1:
 		last_error = "Failed to launch Ruffle."
 	return _pid

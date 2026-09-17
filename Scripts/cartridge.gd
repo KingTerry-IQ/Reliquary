@@ -188,13 +188,26 @@ static func meta_row(entry: Dictionary, sha: String, raw_bytes: int) -> Dictiona
 		"id": META_ID,
 		"uuid": str(entry.get("id", "")),
 		"title": str(entry.get("title", "")),
-		"launch": str(entry.get("launchCommand", "")),
+		"launch": str(entry.get("launchCommand", entry.get("launch", ""))),
 		"sha256": sha,
 		"bytes": str(raw_bytes),
 		"kind": "zip",
 		"platform": str(entry.get("platform", "Flash")),
-		"data": "",
+		"data": str(entry.get("applicationPath", "")),
 	}
+
+
+## Meta.data holds applicationPath so Play still knows the projector after listing strips data.
+static func hydrate_meta(meta: Dictionary) -> Dictionary:
+	if meta.is_empty():
+		return meta
+	if str(meta.get("applicationPath", "")).is_empty():
+		var app := str(meta.get("data", "")).strip_edges()
+		if not app.is_empty() and app.length() < 400:
+			meta["applicationPath"] = app
+	if str(meta.get("launchCommand", "")).is_empty() and not str(meta.get("launch", "")).is_empty():
+		meta["launchCommand"] = str(meta.get("launch", ""))
+	return meta
 
 
 static func blob_row(sha: String, raw_bytes: int, b64: String) -> Dictionary:

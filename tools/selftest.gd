@@ -134,6 +134,115 @@ func _run() -> void:
 		Unzip.path_from_launch('"http://farm.maxgames.com/game.dcr" --forceTheExitLock 0')
 		== "farm.maxgames.com/game.dcr"
 	)
+	var sas2 := "http://3rdsense.com/Swords and Sandals 2/Swords and Sandals 2.swf"
+	_check("unquoted Flash URL keeps spaces", Unzip.movie_url(sas2) == sas2)
+	_check(
+		"spaced Flash path is host/path",
+		Unzip.path_from_launch(sas2)
+		== "3rdsense.com/Swords and Sandals 2/Swords and Sandals 2.swf"
+	)
+	_check("spaced Flash URL has no extra args", Unzip.extra_args(sas2).is_empty())
+	var unquoted_flags := Unzip.extra_args("http://farm.maxgames.com/game.dcr --forceTheExitLock 0")
+	_check(
+		"unquoted URL extra args after --",
+		unquoted_flags.size() == 2
+		and unquoted_flags[0] == "--forceTheExitLock"
+		and unquoted_flags[1] == "0"
+	)
+	_check(
+		"encode launch URL percent-encodes spaces",
+		Unzip.encode_launch_url(sas2).find("%20") >= 0
+		and Unzip.encode_launch_url(sas2).begins_with("http://3rdsense.com/")
+		and Unzip.encode_launch_url(sas2).ends_with(".swf")
+	)
+	_check(
+		"legacy url encodes spaced Flash path",
+		Flashpoint.legacy_url(sas2).find("Swords%20and%20Sandals%202") >= 0
+	)
+	var rargs := Ruffle.cli_args(sas2, "", "http://127.0.0.1:18765", sas2)
+	_check("ruffle encodes movie spaces", rargs.size() > 0 and rargs[0].find("%20") >= 0)
+	_check("ruffle proxy flag", rargs.find("--proxy") >= 0)
+	_check("ruffle spoof-url flag", rargs.find("--spoof-url") >= 0)
+	_check("ruffle omits --base when unused", rargs.find("--base") < 0)
+	var sargs := Ruffle.cli_args("http://x/a.swf", "", "", "", "C:/saves/ruffle")
+	_check("ruffle stores SharedObjects on disk", sargs.find("--save-directory") >= 0 and sargs.find("C:/saves/ruffle") >= 0)
+	_check(
+		"ruffle for spaced Flash URL",
+		Flashpoint.uses_ruffle({"platform": "Flash", "launchCommand": sas2})
+	)
+	_check(
+		"Unity version prefix is not the path",
+		Unzip.movie_url("5.x http://chat.kongregate.com/gamez/0016/7201/live/index.html")
+		== "http://chat.kongregate.com/gamez/0016/7201/live/index.html"
+	)
+	_check(
+		"Unity prefix path is host/path",
+		Unzip.path_from_launch("2.x http://img-hws.y8.com/game/index.html")
+		== "img-hws.y8.com/game/index.html"
+	)
+	_check(
+		"Pulse quoted URL after runtime prefix",
+		Unzip.movie_url('Pulse "http://localpulse/learningfriends/StartHere.html"')
+		== "http://localpulse/learningfriends/StartHere.html"
+	)
+	_check(
+		"ShiVa prefix URL",
+		Unzip.movie_url("shiva3d http://www.shotiris.net/file.stk")
+		== "http://www.shotiris.net/file.stk"
+	)
+	var oldcpu := '-t 366 -sw ..\\Shockwave\\PJ101\\SPR.exe http://www.mediamacros.com/item_files/937495492/centipede.dcr'
+	_check(
+		"OldCPUSimulator launch URL is the dcr",
+		Unzip.movie_url(oldcpu) == "http://www.mediamacros.com/item_files/937495492/centipede.dcr"
+	)
+	_check(
+		"OldCPUSimulator extra args skip -t -sw",
+		Unzip.extra_args(oldcpu + " --disableGoToNetPage").size() == 1
+		and Unzip.extra_args(oldcpu + " --disableGoToNetPage")[0] == "--disableGoToNetPage"
+	)
+	_check(
+		"ActiveX trailing dll is not the URL",
+		Unzip.movie_url("http://games.bigfishgames.com/online/index.html mjolauncher\\mjolauncher.dll")
+		== "http://games.bigfishgames.com/online/index.html"
+	)
+	_check(
+		"quoted Flash URL with apostrophe",
+		Unzip.movie_url("\"http://i.4cdn.org/f/I'm Dead.swf\"")
+		== "http://i.4cdn.org/f/I'm Dead.swf"
+	)
+	_check(
+		"hash is not part of the path",
+		Unzip.path_from_launch("http://example.com/game.swf#zoom") == "example.com/game.swf"
+	)
+	_check_launch_resolve()
+	_check(
+		"inscribed launch field still ruffles",
+		Flashpoint.uses_ruffle({"platform": "Flash", "launch": "http://x/a.swf"})
+	)
+	_check(
+		"Unity HTML still needs Flashpoint",
+		FlashpointHost.needs_flashpoint({
+			"platform": "Unity",
+			"launchCommand": "5.x http://x/index.html",
+			"applicationPath": "FPSoftware\\startUnity.bat",
+		})
+	)
+	_check(
+		"HTML5 does not need CLIFp",
+		not FlashpointHost.needs_flashpoint({"platform": "HTML5", "launchCommand": "http://x/index.html"})
+	)
+	_check(
+		"Java needs Flashpoint",
+		FlashpointHost.needs_flashpoint({"platform": "Java", "launchCommand": "http://x/index.html"})
+	)
+	_check(
+		"Silverlight needs Flashpoint",
+		FlashpointHost.needs_flashpoint({"platform": "Silverlight", "launchCommand": "http://x/index.html"})
+	)
+	_check(
+		"browser is not used for Unity",
+		not Flashpoint.uses_browser({"platform": "Unity", "launchCommand": "http://x/index.html"})
+	)
 	_check(
 		"shockwave dcr needs SPR",
 		FlashpointHost.needs_shockwave({"platform": "Shockwave", "launchCommand": "http://x/a.dcr"})
@@ -143,10 +252,44 @@ func _run() -> void:
 		not FlashpointHost.needs_flashpoint({"platform": "Shockwave", "launchCommand": "http://x/a.dcr"})
 	)
 	_check(
+		"OldCPUSimulator dcr still needs SPR",
+		FlashpointHost.needs_shockwave({
+			"platform": "Shockwave",
+			"applicationPath": "FPSoftware\\OldCPUSimulator\\OldCPUSimulator.exe",
+			"launchCommand": oldcpu,
+		})
+	)
+	_check(
 		"PJ folder from applicationPath",
 		Spr.projector_folder("FPSoftware\\Shockwave\\PJ1159\\SPR.exe") == "PJ1159"
 	)
 	_check("default PJ is PJ101", Spr.projector_folder("") == "PJ101")
+	_check(
+		"PJ folder from OldCPUSimulator launch",
+		Spr.projector_for({
+			"applicationPath": "FPSoftware\\OldCPUSimulator\\OldCPUSimulator.exe",
+			"launchCommand": oldcpu,
+		})
+		== "PJ101"
+	)
+	var hydrated := Cartridge.hydrate_meta({
+		"launch": "http://x/a.dcr",
+		"data": "FPSoftware\\Shockwave\\PJ851\\SPR.exe",
+	})
+	_check(
+		"hydrate meta restores applicationPath",
+		str(hydrated.get("applicationPath", "")).find("PJ851") >= 0
+		and str(hydrated.get("launchCommand", "")) == "http://x/a.dcr"
+	)
+	_check(
+		"meta row stores applicationPath in data",
+		str(Cartridge.meta_row(
+			{"id": "u", "title": "T", "launchCommand": "http://x/a.dcr", "platform": "Shockwave", "applicationPath": "FPSoftware\\Shockwave\\PJ851\\SPR.exe"},
+			"abc",
+			12
+		).get("data", "")).find("PJ851")
+		>= 0
+	)
 	_check(
 		"SPR Windows launch uses a normal window",
 		Spr.LAUNCH_PS1.find("ProcessWindowStyle]::Normal") >= 0
@@ -164,7 +307,36 @@ func _run() -> void:
 		"games": [{"id": "aaa"}, {"gameId": "bbb"}, {"id": "aaa"}],
 	})
 	_check("playlist ids from games[].id", pl.size() == 2 and pl[0] == "aaa" and pl[1] == "bbb")
+	var hof := Flashpoint.parse_playlist_ids(JSON.parse_string(
+		'{"games":[{"id":2067,"gameId":"f31407f9-bd4c-4687-9b79-91954433d569"},{"id":2068,"gameId":"5b857b0e-2bb8-4983-a5fd-399bc1db2236"},{"id":2067,"gameId":"f31407f9-bd4c-4687-9b79-91954433d569"}]}'
+	))
+	_check(
+		"playlist prefers gameId over numeric row id",
+		hof.size() == 2
+		and hof[0] == "f31407f9-bd4c-4687-9b79-91954433d569"
+		and hof[1] == "5b857b0e-2bb8-4983-a5fd-399bc1db2236"
+	)
 	_check("All Games is first playlist", str(Flashpoint.PLAYLISTS[0].get("id", "")) == "all")
+	var catalog_rows: Array = [
+		{"id": "aaa", "title": "Alpha"},
+		{"id": "bbb", "title": "Beta"},
+		{"id": "ccc", "title": "Gamma"},
+	]
+	var picked: Array = Flashpoint.rows_for_ids(
+		catalog_rows,
+		PackedStringArray(["ccc", "aaa", "zzz", "ccc"])
+	)
+	_check(
+		"playlist rows follow catalog ids in playlist order",
+		picked.size() == 2
+		and str(picked[0].get("title", "")) == "Gamma"
+		and str(picked[1].get("title", "")) == "Alpha"
+	)
+	var missing: PackedStringArray = Flashpoint.missing_ids(
+		picked,
+		PackedStringArray(["ccc", "aaa", "zzz"])
+	)
+	_check("playlist missing ids skip catalog hits", missing.size() == 1 and missing[0] == "zzz")
 	var alpha: Array = [{"title": "Zed"}, {"title": "alpha"}, {"title": "Beta"}]
 	Flashpoint.sort_titles(alpha)
 	_check(
@@ -191,6 +363,116 @@ func _run() -> void:
 		"origin GET plus Host becomes archive path",
 		LocalHttp.target_path("GET /game.dcr HTTP/1.1\r\nHost: www.miniclip.com\r\n\r\n")
 		== "www.miniclip.com/game.dcr"
+	)
+	_check(
+		"proxy GET decodes spaced Flash path",
+		LocalHttp.target_path(
+			"GET http://3rdsense.com/Swords%20and%20Sandals%202/Swords%20and%20Sandals%202.swf HTTP/1.1\r\n\r\n"
+		)
+		== "3rdsense.com/Swords and Sandals 2/Swords and Sandals 2.swf"
+	)
+	_check(
+		"proxy GET keeps unencoded spaces in request line",
+		LocalHttp.target_path(
+			"GET http://3rdsense.com/Swords and Sandals 2/Swords and Sandals 2.swf HTTP/1.1\r\n\r\n"
+		)
+		== "3rdsense.com/Swords and Sandals 2/Swords and Sandals 2.swf"
+	)
+	_check(
+		"ruffle asset ignores host mapping",
+		LocalHttp.ruffle_asset_rel("tetrisow-a.akamaihd.net/__ruffle/ruffle.js") == "ruffle.js"
+	)
+	_check(
+		"ruffle asset from origin path",
+		LocalHttp.ruffle_asset_rel("__ruffle/core.ruffle.wasm") == "core.ruffle.wasm"
+	)
+	_check(
+		"html injects ruffle before head close",
+		LocalHttp.inject_ruffle_html("<html><head></head><body></body></html>").find("/__ruffle/ruffle.js") >= 0
+	)
+	_check(
+		"absolute URLs fold onto this origin",
+		LocalHttp.rewrite_absolute_urls('<script src="http://cdn.example.com/game.js"></script>')
+		== '<script src="/cdn.example.com/game.js"></script>'
+	)
+	_check(
+		"localhost URLs are not rewritten",
+		LocalHttp.rewrite_absolute_urls('http://127.0.0.1:18765/a.js') == "http://127.0.0.1:18765/a.js"
+	)
+	_check(
+		"cartridge hook patches fetch",
+		LocalHttp.inject_cartridge_html("<html><head></head></html>").find("window.fetch") >= 0
+	)
+	_check(
+		"html inject is idempotent",
+		LocalHttp.inject_ruffle_html("<script src=\"/__ruffle/ruffle.js\"></script>").find("ruffle.js")
+		== LocalHttp.inject_ruffle_html(LocalHttp.inject_ruffle_html("<script src=\"/__ruffle/ruffle.js\"></script>")).find("ruffle.js")
+	)
+	var bargs := LocalHttp.browser_launch_args("http://example.com/game.html", 18765, "C:/tmp/profile")
+	var proxy_arg := ""
+	for a in bargs:
+		if str(a).begins_with("--proxy-server"):
+			proxy_arg = str(a)
+	_check("browser uses a per-process HTTP proxy", proxy_arg.find("http=127.0.0.1:18765") >= 0)
+	_check("browser does not proxy HTTPS probes", proxy_arg.find("https=direct://") >= 0)
+	_check("browser opens the original host URL", bargs.find("http://example.com/game.html") >= 0)
+	_httpd_survives_dropped_peer()
+	_check(
+		"HTML5 uses Navigator pack, not Chromium",
+		Packs.pack_id_for({"platform": "HTML5", "applicationPath": "FPSoftware\\fpnavigator-portable\\FPNavigator.exe"})
+		== "supportpack-common-fpnavigator"
+	)
+	_check(
+		"Unity maps to the Unity support pack",
+		Packs.pack_id_for({"platform": "Unity", "applicationPath": "FPSoftware\\startUnity.bat"})
+		== "supportpack-unity"
+	)
+	_check(
+		"Java maps to the Java support pack",
+		Packs.pack_id_for({"platform": "Java", "launchCommand": "http://x/index.html"})
+		== "supportpack-java"
+	)
+	_check("Navigator prefs pin HTTP proxy", Packs.NAV_PREFS.find("network.proxy.http_port") >= 0)
+	var shiva_inv := Packs.secureplayer_invocation(
+		{
+			"applicationPath": "FPSoftware\\FlashpointSecurePlayer.exe",
+			"launchCommand": "shiva3d http://www.shotiris.net/tmp/bubblePipe.stk",
+		},
+		"http://localhost:22600/www.shotiris.net/tmp/bubblePipe.stk",
+		"http://www.shotiris.net/tmp/bubblePipe.stk"
+	)
+	_check(
+		"ShiVa SecurePlayer gets original URL for 22600 rewrite",
+		shiva_inv.size() == 2
+		and shiva_inv[0] == "shiva3d"
+		and shiva_inv[1].begins_with("http://www.shotiris.net/")
+	)
+	var activex_inv := Packs.secureplayer_invocation(
+		{
+			"applicationPath": "FPSoftware\\startActiveX.bat",
+			"launchCommand": "http://games.bigfishgames.com/online/index.html mjolauncher\\mjolauncher.dll",
+		},
+		"http://localhost:22600/games.bigfishgames.com/online/index.html",
+		"http://games.bigfishgames.com/online/index.html"
+	)
+	_check(
+		"ActiveX SecurePlayer gets template plus local page",
+		activex_inv.size() == 2
+		and activex_inv[0].find("mjolauncher") >= 0
+		and activex_inv[1].begins_with("http://localhost:22600/")
+	)
+	_check("Unity pack label is readable", Packs.pack_label("supportpack-unity").find("Unity") >= 0)
+	var parsed_packs := Packs._parse_components(
+		(
+			"<list><category id=\"supportpack\"><category id=\"common\">"
+			+ "<component id=\"fpnavigator\" hash=\"abc\" />"
+			+ "</category><component id=\"unity\" hash=\"def\" depends=\"supportpack-common-fpnavigator\" />"
+			+ "</category></list>"
+		).to_utf8_buffer()
+	)
+	_check(
+		"component ids nest category prefixes",
+		parsed_packs.has("supportpack-common-fpnavigator") and parsed_packs.has("supportpack-unity")
 	)
 	var parsed := Flashpoint.parse_query("title:Bowman tag:Arcade leftover")
 	_check("prefix title", str(parsed.get("title", "")) == "Bowman")
@@ -280,6 +562,9 @@ func _run() -> void:
 	main._sel_tag = "Arcade"
 	main._search.text = "Bowman"
 	main._browse_letter = "B"
+	main._playlist_id = "playlist-halloffame"
+	if main._playlist != null and main._playlist.item_count > 1:
+		main._playlist.select(1)
 	main._search_facet("tag", "Shooter")
 	_check(
 		"stage tag click clears other facets",
@@ -290,11 +575,26 @@ func _run() -> void:
 		and main._search.text.is_empty()
 		and main._browse_letter.is_empty()
 	)
+	_check(
+		"stage tag click switches to All Games",
+		main._playlist_id == "all"
+		and (
+			main._playlist == null
+			or str(main._playlist.get_item_metadata(main._playlist.selected)) == "all"
+		)
+	)
+	main._playlist_id = "playlist-halloffame"
+	if main._playlist != null and main._playlist.item_count > 1:
+		main._playlist.select(1)
 	main._sel_tag = "Arcade"
 	main._search_facet("dev", "Tom Fulp")
 	_check(
 		"stage developer click clears tags",
 		main._sel_dev == "Tom Fulp" and main._sel_tag.is_empty()
+	)
+	_check(
+		"stage developer click switches to All Games",
+		main._playlist_id == "all"
 	)
 	main.free()
 
@@ -304,6 +604,109 @@ func _run() -> void:
 	pick.free()
 
 	print("selftest: %d passed, %d failed" % [_passed, _failed])
+
+
+func _write_probe(path: String) -> void:
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(path.get_base_dir()))
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f:
+		f.store_buffer(PackedByteArray([1, 2, 3]))
+		f.close()
+
+
+func _check_launch_resolve() -> void:
+	var root := "user://selftest_launch"
+	var abs := ProjectSettings.globalize_path(root)
+	DirAccess.make_dir_recursive_absolute(abs)
+	_write_probe(root.path_join("content/amanita-design.net/samorost-1/main.swf"))
+	_write_probe(root.path_join("content/amanita-design.net/samorost-1/lyzar1.swf"))
+	_write_probe(root.path_join("content/games.bigfishgames.com/en_samorost-1/online/Samorost1.swf"))
+	_write_probe(root.path_join("content/localflash/fishy.swf"))
+	_write_probe(root.path_join("content/cache.armorgames.com/files/games/shift-751.swf"))
+	var stale := "http://localflash/samorost/main.swf"
+	_check(
+		"stale launch maps onto the extract host path",
+		Unzip.resolved_rel(root, stale) == "amanita-design.net/samorost-1/main.swf"
+	)
+	_check(
+		"stale launch movie is the extract URL",
+		Unzip.resolved_movie(root, stale) == "http://amanita-design.net/samorost-1/main.swf"
+	)
+	_check(
+		"stale launch does not pick a sibling scene",
+		Unzip.file_matching(root, stale).replace("\\", "/").ends_with("/samorost-1/main.swf")
+	)
+	_check(
+		"proxy GET of resolved movie stays on the extract path",
+		LocalHttp.target_path("GET http://amanita-design.net/samorost-1/main.swf HTTP/1.1\r\n\r\n")
+		== "amanita-design.net/samorost-1/main.swf"
+	)
+	_check(
+		"exact localflash launch still wins",
+		Unzip.resolved_rel(root, "http://localflash/fishy.swf") == "localflash/fishy.swf"
+	)
+	_check(
+		"renamed pack still finds the movie by path tokens",
+		Unzip.resolved_rel(root, "http://localflash/shift-751817f.swf")
+		== "cache.armorgames.com/files/games/shift-751.swf"
+	)
+
+
+func _tcp_wait(peer: StreamPeerTCP, want: int, ms: int) -> bool:
+	var start := Time.get_ticks_msec()
+	while Time.get_ticks_msec() - start < ms:
+		peer.poll()
+		if peer.get_status() == want:
+			return true
+		if peer.get_status() == StreamPeerTCP.STATUS_ERROR:
+			return false
+		OS.delay_msec(1)
+	return peer.get_status() == want
+
+
+func _httpd_survives_dropped_peer() -> void:
+	var httpd := LocalHttp.new()
+	var root := "user://selftest_http"
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(root))
+	var idx := FileAccess.open(root.path_join("index.html"), FileAccess.WRITE)
+	_check("httpd probe file", idx != null)
+	if idx:
+		idx.store_string("<html>ok</html>")
+		idx.close()
+	var hp := httpd.serve(root)
+	_check("httpd listens", hp > 0)
+	if hp <= 0:
+		httpd.free()
+		return
+	var abort := StreamPeerTCP.new()
+	abort.connect_to_host("127.0.0.1", hp)
+	_tcp_wait(abort, StreamPeerTCP.STATUS_CONNECTED, 1000)
+	abort.disconnect_from_host()
+	httpd._process(0.0)
+	var client := StreamPeerTCP.new()
+	client.connect_to_host("127.0.0.1", hp)
+	_check("httpd client connects after a dropped peer", _tcp_wait(client, StreamPeerTCP.STATUS_CONNECTED, 1000))
+	var body := ""
+	if client.get_status() == StreamPeerTCP.STATUS_CONNECTED:
+		client.put_data("GET /index.html HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".to_utf8_buffer())
+		var resp := PackedByteArray()
+		var start := Time.get_ticks_msec()
+		while Time.get_ticks_msec() - start < 1000:
+			httpd._process(0.0)
+			client.poll()
+			if client.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+				break
+			var n := client.get_available_bytes()
+			if n > 0:
+				resp.append_array(client.get_data(n)[1])
+				if resp.get_string_from_utf8().find("ok</html>") >= 0:
+					break
+			OS.delay_msec(1)
+		body = resp.get_string_from_utf8()
+		client.disconnect_from_host()
+	_check("httpd serves after a dropped peer", body.find("HTTP/1.1 200") >= 0 and body.find("ok</html>") >= 0)
+	httpd.stop()
+	httpd.free()
 
 
 func _check(name: String, ok: bool) -> void:
