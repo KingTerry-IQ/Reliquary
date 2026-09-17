@@ -379,6 +379,41 @@ func _run() -> void:
 		== "3rdsense.com/Swords and Sandals 2/Swords and Sandals 2.swf"
 	)
 	_check(
+		"proxy FTP GET maps host/path",
+		LocalHttp.target_path("GET ftp://cache.lego.com/eng/game.dcr HTTP/1.0\r\n\r\n")
+		== "cache.lego.com/eng/game.dcr"
+	)
+	_check(
+		"http version echoes HTTP/1.0",
+		LocalHttp.http_version("GET http://x/a.dcr HTTP/1.0\r\n\r\n") == "HTTP/1.0"
+	)
+	_check(
+		"http version defaults to HTTP/1.1",
+		LocalHttp.http_version("GET /a.dcr HTTP/1.1\r\n\r\n") == "HTTP/1.1"
+	)
+	_check(
+		"http date is RFC 1123 GMT",
+		LocalHttp.http_date(0).ends_with(" GMT") and LocalHttp.http_date(0).find(",") > 0
+	)
+	_check(
+		"director unpublished cast maps to cct",
+		LocalHttp.director_alt_rel("spynet/sound_level_1.cst") == "spynet/sound_level_1.cct"
+	)
+	_check(
+		"director published movie maps to dir",
+		LocalHttp.director_alt_rel("game.dcr") == "game.dir"
+	)
+	_check(
+		"windows authoring path is a filesystem rel",
+		LocalHttp.is_filesystem_rel(
+			"C:/Documents and Settings/Administrator/Desktop/SPYBOTS/CODE/phase_6_GOLD_FINAL/807/sound_level_1.cst"
+		)
+	)
+	_check(
+		"archive host path is not a filesystem rel",
+		not LocalHttp.is_filesystem_rel("cache.lego.com/eng/games/spybotics/spynet/sound_level_1.cct")
+	)
+	_check(
 		"ruffle asset ignores host mapping",
 		LocalHttp.ruffle_asset_rel("tetrisow-a.akamaihd.net/__ruffle/ruffle.js") == "ruffle.js"
 	)
@@ -650,6 +685,28 @@ func _check_launch_resolve() -> void:
 		Unzip.resolved_rel(root, "http://localflash/shift-751817f.swf")
 		== "cache.armorgames.com/files/games/shift-751.swf"
 	)
+	_write_probe(root.path_join("content/cache.lego.com/eng/games/spybotics/spynet/spybot_0807_sw.dcr"))
+	_write_probe(root.path_join("content/cache.lego.com/eng/games/spybotics/spynet/sound_level_1.cct"))
+	var spy_root := root.path_join("content")
+	_check(
+		"director cst request folds onto the published cct",
+		LocalHttp.file_in_tree(spy_root, "cache.lego.com/eng/games/spybotics/spynet/sound_level_1.cst")
+		.replace("\\", "/")
+		.ends_with("/spynet/sound_level_1.cct")
+	)
+	var spy_hint := ProjectSettings.globalize_path(
+		spy_root.path_join("cache.lego.com/eng/games/spybotics/spynet")
+	)
+	_check(
+		"authoring-path cast resolves next to the movie",
+		LocalHttp.file_in_tree(
+			spy_root,
+			"C:/Documents and Settings/Administrator/Desktop/SPYBOTS/CODE/phase_6_GOLD_FINAL/807/sound_level_1.cst",
+			spy_hint
+		)
+		.replace("\\", "/")
+		.ends_with("/spynet/sound_level_1.cct")
+	)
 
 
 func _tcp_wait(peer: StreamPeerTCP, want: int, ms: int) -> bool:
@@ -705,6 +762,39 @@ func _httpd_survives_dropped_peer() -> void:
 		body = resp.get_string_from_utf8()
 		client.disconnect_from_host()
 	_check("httpd serves after a dropped peer", body.find("HTTP/1.1 200") >= 0 and body.find("ok</html>") >= 0)
+	var dcr := FileAccess.open(root.path_join("probe.dcr"), FileAccess.WRITE)
+	_check("httpd director probe file", dcr != null)
+	if dcr:
+		dcr.store_buffer(PackedByteArray([0x58, 0x46, 0x49, 0x52, 0x08, 0x00, 0x00, 0x00]))
+		dcr.close()
+	var sw := StreamPeerTCP.new()
+	sw.connect_to_host("127.0.0.1", hp)
+	_check("httpd shockwave client connects", _tcp_wait(sw, StreamPeerTCP.STATUS_CONNECTED, 1000))
+	var sw_body := ""
+	if sw.get_status() == StreamPeerTCP.STATUS_CONNECTED:
+		sw.put_data("GET /probe.dcr HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".to_utf8_buffer())
+		var sw_resp := PackedByteArray()
+		var sw_start := Time.get_ticks_msec()
+		while Time.get_ticks_msec() - sw_start < 1000:
+			httpd._process(0.0)
+			sw.poll()
+			if sw.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+				break
+			var sn := sw.get_available_bytes()
+			if sn > 0:
+				sw_resp.append_array(sw.get_data(sn)[1])
+				if sw_resp.get_string_from_utf8().find("\r\n\r\n") >= 0 and sw_resp.size() >= 8:
+					break
+			OS.delay_msec(1)
+		sw_body = sw_resp.get_string_from_utf8()
+		sw.disconnect_from_host()
+	_check("httpd echoes HTTP/1.0 for Shockwave", sw_body.begins_with("HTTP/1.0 200"))
+	_check("httpd sends Last-Modified for Director files", sw_body.find("Last-Modified:") >= 0)
+	_check(
+		"httpd omits CORP header Shockwave treats as a bad movie",
+		sw_body.find("Cross-Origin-Resource-Policy") < 0
+	)
+	_check("httpd omits Connection close for Shockwave", sw_body.find("Connection: close") < 0)
 	httpd.stop()
 	httpd.free()
 

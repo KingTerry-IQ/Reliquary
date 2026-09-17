@@ -15,6 +15,8 @@ var _root: String = ""
 var _remote: String = ""
 var _ruffle_web: String = ""
 var _rewrite_hosts: bool = true
+## Directory of the last file we actually served (linked Director casts).
+var _last_ok_dir: String = ""
 
 
 func serve(
@@ -29,6 +31,7 @@ func serve(
 	_remote = remote.rstrip("/") + "/" if not remote.is_empty() else ""
 	_ruffle_web = ProjectSettings.globalize_path(ruffle_web) if not ruffle_web.is_empty() else ""
 	_rewrite_hosts = rewrite_hosts
+	_last_ok_dir = ""
 	for p in range(prefer, prefer + 30):
 		if _server.listen(p, "127.0.0.1") == OK:
 			port = p
@@ -202,6 +205,7 @@ func stop() -> void:
 	if _server.is_listening():
 		_server.stop()
 	port = 0
+	_last_ok_dir = ""
 
 
 func _process(_dt: float) -> void:
@@ -257,22 +261,35 @@ func _serve_peer(peer: StreamPeerTCP) -> void:
 		if not FileAccess.file_exists(rf):
 			rf = _find_in(_ruffle_web, ruffle_rel.get_file())
 		if FileAccess.file_exists(rf):
-			_reply(peer, 200, _mime(rf), FileAccess.get_file_as_bytes(rf), method == "HEAD", text)
+			_reply(peer, 200, _mime(rf), FileAccess.get_file_as_bytes(rf), method == "HEAD", text, FileAccess.get_modified_time(rf))
 			return
-	var full := _root.path_join(path) if not path.is_empty() else _root
-	if path.is_empty() or DirAccess.dir_exists_absolute(full):
-		full = full.path_join("index.html") if not path.is_empty() else _root.path_join("index.html")
-	if not FileAccess.file_exists(full) and not _remote.is_empty() and not path.is_empty():
+	var full := file_in_tree(_root, path, _last_ok_dir)
+	if full.is_empty():
+		var as_dir := _root.path_join(path) if not path.is_empty() else _root
+		if path.is_empty() or DirAccess.dir_exists_absolute(as_dir):
+			full = as_dir.path_join("index.html") if not path.is_empty() else _root.path_join("index.html")
+			if not FileAccess.file_exists(full):
+				full = ""
+	if (
+		full.is_empty()
+		and not _remote.is_empty()
+		and not path.is_empty()
+		and not is_filesystem_rel(path)
+	):
+		var dest := _root.path_join(path)
 		var fetched := _fetch_remote(path)
 		if fetched.size() > 0:
-			DirAccess.make_dir_recursive_absolute(full.get_base_dir())
-			var out := FileAccess.open(full, FileAccess.WRITE)
+			DirAccess.make_dir_recursive_absolute(dest.get_base_dir())
+			var out := FileAccess.open(dest, FileAccess.WRITE)
 			if out:
 				out.store_buffer(fetched)
 				out.close()
-	if not FileAccess.file_exists(full):
+			if FileAccess.file_exists(dest):
+				full = dest
+	if full.is_empty() or not FileAccess.file_exists(full):
 		_reply(peer, 404, "text/plain", "not found".to_utf8_buffer(), method == "HEAD", text)
 		return
+	_last_ok_dir = full.get_base_dir()
 	var body := FileAccess.get_file_as_bytes(full)
 	var mime := _mime(full)
 	if mime.begins_with("text/html"):
@@ -283,7 +300,7 @@ func _serve_peer(peer: StreamPeerTCP) -> void:
 		if not _ruffle_web.is_empty():
 			html = inject_ruffle_html(html)
 		body = html.to_utf8_buffer()
-	_reply(peer, 200, mime, body, method == "HEAD", text)
+	_reply(peer, 200, mime, body, method == "HEAD", text, FileAccess.get_modified_time(full))
 
 
 ## Request-line target (METHOD may be followed by a URL that contains spaces).
@@ -337,6 +354,107 @@ static func target_path(request: String) -> String:
 	return host + "/" + path if not path.is_empty() else host
 
 
+## Echo the request's HTTP version. Shockwave's NetLingo is HTTP/1.0.
+static func http_version(request: String) -> String:
+	var line := request.split("\r\n")[0] if not request.is_empty() else ""
+	var i := line.rfind(" HTTP/")
+	if i < 0:
+		return "HTTP/1.1"
+	var ver := line.substr(i + 1).strip_edges()
+	if ver.begins_with("HTTP/1.0"):
+		return "HTTP/1.0"
+	return "HTTP/1.1"
+
+
+## RFC 1123 date. Shockwave requires Last-Modified on Director files.
+static func http_date(unix: int) -> String:
+	if unix <= 0:
+		unix = int(Time.get_unix_time_from_system())
+	var d := Time.get_datetime_dict_from_unix_time(unix)
+	var wdays := PackedStringArray(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"])
+	var months := PackedStringArray([
+		"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+	])
+	var wd := int(d.get("weekday", (unix / 86400 + 4) % 7))
+	var mo := int(d.get("month", 1))
+	if wd < 0 or wd > 6:
+		wd = int((unix / 86400 + 4) % 7)
+	if mo < 1 or mo > 12:
+		mo = 1
+	return "%s, %02d %s %04d %02d:%02d:%02d GMT" % [
+		wdays[wd],
+		int(d.get("day", 1)),
+		months[mo - 1],
+		int(d.get("year", 1970)),
+		int(d.get("hour", 0)),
+		int(d.get("minute", 0)),
+		int(d.get("second", 0)),
+	]
+
+
+## Published/unpublished Director extensions live next to each other.
+static func director_alt_rel(path: String) -> String:
+	var ext := path.get_extension().to_lower()
+	var stem := path.get_basename()
+	match ext:
+		"cst", "cxt":
+			return stem + ".cct"
+		"cct":
+			return stem + ".cst"
+		"dir", "dxr":
+			return stem + ".dcr"
+		"dcr":
+			return stem + ".dir"
+		_:
+			return ""
+
+
+## Absolute Windows/UNC path that leaked through as a request target.
+static func is_filesystem_rel(path: String) -> bool:
+	var p := path.replace("\\", "/").lstrip("/")
+	if p.length() >= 2:
+		var drive := p[0]
+		var letter := (drive >= "A" and drive <= "Z") or (drive >= "a" and drive <= "z")
+		if letter and p[1] == ":":
+			return true
+	return p.begins_with("//")
+
+
+## Exact extract path, else Director extension fold, else next to the last hit.
+static func file_in_tree(root: String, path: String, hint_dir: String = "") -> String:
+	var dest := ProjectSettings.globalize_path(root)
+	var rel := path.replace("\\", "/")
+	while rel.begins_with("/"):
+		rel = rel.substr(1)
+	var full := dest.path_join(rel) if not rel.is_empty() else dest
+	if FileAccess.file_exists(full):
+		return full
+	var alt := director_alt_rel(full)
+	if not alt.is_empty() and FileAccess.file_exists(alt):
+		return alt
+	var fname := rel.get_file()
+	if fname.is_empty():
+		return ""
+	var hint := ProjectSettings.globalize_path(hint_dir) if not hint_dir.is_empty() else ""
+	if not hint.is_empty():
+		var sib := hint.path_join(fname)
+		if FileAccess.file_exists(sib):
+			return sib
+		var salt := director_alt_rel(sib)
+		if not salt.is_empty() and FileAccess.file_exists(salt):
+			return salt
+	if is_filesystem_rel(rel):
+		var hit := _find_in(dest, fname)
+		if not hit.is_empty() and FileAccess.file_exists(hit):
+			return hit
+		var altf := director_alt_rel(fname)
+		if not altf.is_empty():
+			hit = _find_in(dest, altf)
+			if not hit.is_empty() and FileAccess.file_exists(hit):
+				return hit
+	return ""
+
+
 func _cors_origin(request: String) -> String:
 	for hdr in request.split("\r\n"):
 		if hdr.to_lower().begins_with("origin:"):
@@ -352,7 +470,8 @@ func _reply(
 	mime: String,
 	body: PackedByteArray,
 	head_only: bool = false,
-	request: String = ""
+	request: String = "",
+	last_modified: int = 0
 ) -> void:
 	var reason := "OK"
 	if code == 204:
@@ -367,9 +486,14 @@ func _reply(
 		return
 	var origin := _cors_origin(request)
 	var cred := "" if origin == "*" else "Access-Control-Allow-Credentials: true\r\n"
+	var lm := ""
+	if last_modified > 0:
+		lm = "Last-Modified: %s\r\n" % http_date(last_modified)
+	## Shockwave NetLingo wants the request's HTTP version, Last-Modified, and
+	## no extra hop-by-hop/CORP headers ("not a valid Director file").
 	var head := (
-		"HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\nProxy-Connection: close\r\nAccess-Control-Allow-Origin: %s\r\nAccess-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Expose-Headers: *\r\nAccess-Control-Max-Age: 86400\r\nCross-Origin-Resource-Policy: cross-origin\r\n%s\r\n"
-		% [code, reason, mime, body.size(), origin, cred]
+		"%s %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\n%sAccess-Control-Allow-Origin: %s\r\nAccess-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\n%s\r\n"
+		% [http_version(request), code, reason, mime, body.size(), lm, origin, cred]
 	)
 	peer.put_data(head.to_utf8_buffer())
 	if not head_only:
@@ -422,7 +546,7 @@ func _fetch_remote(rel: String) -> PackedByteArray:
 	return body
 
 
-func _find_in(dir: String, filename: String) -> String:
+static func _find_in(dir: String, filename: String) -> String:
 	var want := filename.to_lower()
 	var d := DirAccess.open(dir)
 	if d == null:
