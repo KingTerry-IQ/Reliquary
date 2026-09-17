@@ -1,12 +1,17 @@
 ## Type-to-filter picker. Stores the full name list; the popup only draws
 ## matches (capped), so tens of thousands of developers do not freeze OptionButton.
+##
+## This is a container on purpose: a bare Control with a full-rect button reports
+## zero height, and a flow row then stacks every picker on the same pixels.
 
 class_name FacetPick
-extends Control
+extends HBoxContainer
 
 signal picked(value: String)
 
 const SHOW := 120
+const POP_H := 320
+const ROW_H := 28
 
 var all_label: String = "All"
 var names: PackedStringArray = PackedStringArray()
@@ -19,22 +24,39 @@ var _list: ItemList
 var _hint: Label
 
 
-func _ready() -> void:
-	custom_minimum_size = Vector2(150, 0)
+func _init() -> void:
 	size_flags_horizontal = SIZE_EXPAND_FILL
+	custom_minimum_size = Vector2(0, ROW_H)
+	add_theme_constant_override("separation", 0)
+
+
+func _ready() -> void:
 	_btn = Button.new()
-	_btn.text = all_label
+	_btn.text = "%s  ▾" % all_label
 	_btn.clip_text = true
-	_btn.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
+	_btn.size_flags_horizontal = SIZE_EXPAND_FILL
+	_btn.size_flags_vertical = SIZE_EXPAND_FILL
+	_btn.custom_minimum_size = Vector2(0, ROW_H)
 	_btn.pressed.connect(_open)
 	add_child(_btn)
 
 	_pop = PopupPanel.new()
 	_pop.unresizable = true
+	_pop.add_theme_stylebox_override("panel", TempleTheme._outline(TempleTheme.YELLOW, TempleTheme.BLACK))
 	add_child(_pop)
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 6)
-	_pop.add_child(box)
+	box.size_flags_horizontal = SIZE_EXPAND_FILL
+	box.size_flags_vertical = SIZE_EXPAND_FILL
+	var pad := MarginContainer.new()
+	pad.add_theme_constant_override("margin_left", 8)
+	pad.add_theme_constant_override("margin_right", 8)
+	pad.add_theme_constant_override("margin_top", 8)
+	pad.add_theme_constant_override("margin_bottom", 8)
+	pad.size_flags_horizontal = SIZE_EXPAND_FILL
+	pad.size_flags_vertical = SIZE_EXPAND_FILL
+	_pop.add_child(pad)
+	pad.add_child(box)
 
 	_filter = LineEdit.new()
 	_filter.placeholder_text = "type to search…"
@@ -48,7 +70,9 @@ func _ready() -> void:
 	box.add_child(_hint)
 
 	_list = ItemList.new()
-	_list.custom_minimum_size = Vector2(260, 220)
+	_list.size_flags_horizontal = SIZE_EXPAND_FILL
+	_list.size_flags_vertical = SIZE_EXPAND_FILL
+	_list.custom_minimum_size = Vector2(0, 180)
 	_list.auto_height = false
 	_list.item_activated.connect(func(i: int) -> void: _choose(i))
 	_list.item_selected.connect(func(i: int) -> void: pass)
@@ -70,10 +94,10 @@ func _refresh_button() -> void:
 	if _btn == null:
 		return
 	if value.is_empty():
-		_btn.text = all_label
+		_btn.text = "%s  ▾" % all_label
 		_btn.add_theme_color_override("font_color", TempleTheme.YELLOW)
 	else:
-		_btn.text = value
+		_btn.text = "%s  ▾" % value
 		_btn.add_theme_color_override("font_color", TempleTheme.CYAN)
 
 
@@ -81,9 +105,21 @@ func _open() -> void:
 	_filter.text = ""
 	_rebuild()
 	var g := get_global_rect()
-	_pop.size = Vector2i(280, 300)
-	_pop.position = Vector2i(int(g.position.x), int(g.position.y + g.size.y))
-	_pop.popup()
+	var vp := get_viewport().get_visible_rect()
+	var w := maxi(int(g.size.x), 220)
+	w = mini(w, maxi(220, int(vp.size.x) - 24))
+	var h := POP_H
+	var x := g.position.x
+	var y := g.position.y + g.size.y
+	if x + float(w) > vp.position.x + vp.size.x:
+		x = vp.position.x + vp.size.x - float(w)
+	if x < vp.position.x:
+		x = vp.position.x
+	if y + float(h) > vp.position.y + vp.size.y:
+		y = g.position.y - float(h)
+		if y < vp.position.y:
+			y = vp.position.y + vp.size.y - float(h)
+	_pop.popup(Rect2i(Vector2i(int(x), int(y)), Vector2i(w, h)))
 	_filter.grab_focus()
 
 
@@ -91,6 +127,8 @@ func _rebuild() -> void:
 	_list.clear()
 	_list.add_item(all_label)
 	_list.set_item_metadata(0, "")
+	if value.is_empty():
+		_list.set_item_custom_fg_color(0, TempleTheme.YELLOW)
 	var needle := _filter.text.strip_edges().to_lower()
 	var shown := 0
 	var hits := 0
@@ -101,7 +139,10 @@ func _rebuild() -> void:
 		if shown >= SHOW:
 			continue
 		_list.add_item(name)
-		_list.set_item_metadata(_list.item_count - 1, name)
+		var idx := _list.item_count - 1
+		_list.set_item_metadata(idx, name)
+		if name == value:
+			_list.set_item_custom_fg_color(idx, TempleTheme.CYAN)
 		shown += 1
 	if needle.is_empty():
 		_hint.text = "%d names  ·  type to jump" % names.size()

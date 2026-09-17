@@ -1,7 +1,7 @@
 extends Control
 
 const CONFIG_PATH := "user://flash.cfg"
-const APP_NAME := "Flash Cartridge"
+const APP_NAME := "Reliquary"
 const PAGE_SIZE := 400
 const CABINET_PAGE := 80
 const GENRES: PackedStringArray = [
@@ -53,10 +53,15 @@ var _library: OptionButton
 var httpd: LocalHttp
 var fp_host := FlashpointHost.new()
 var _spr_label: Label
-var _letter_bar: HFlowContainer
+var _letter_bar: VBoxContainer
 var _browse_letter: String = ""
 var _letter_buttons: Dictionary = {}
-var _tag_box: HBoxContainer
+var _meta_box: HFlowContainer
+var _tag_box: HFlowContainer
+var _shot_marquee: Label
+var _shot_marquee_bg: ColorRect
+var _log_btn: Button
+var _log_open: bool = false
 var _size_ticket: int = 0
 var _preview_bytes: int = -1
 var _archive: ItemList
@@ -96,9 +101,11 @@ var _cabinet_rows: Array = []
 var _cabinet_page: int = 0
 var _cabinet_letter: String = ""
 var _cabinet_plat: String = ""
+var _cabinet_cached: bool = false
+var _cabinet_cached_btn: Button
 var _cabinet_filter: LineEdit
 var _cabinet_platform: OptionButton
-var _cabinet_letters: HFlowContainer
+var _cabinet_letters: VBoxContainer
 var _cabinet_letter_buttons: Dictionary = {}
 var _cabinet_page_row: HBoxContainer
 var _cabinet_page_label: Label
@@ -113,7 +120,6 @@ var _shot: TextureRect
 var _shot_empty: Label
 var _detail_title: Label
 var _detail_chip: Label
-var _detail_meta: Label
 var _detail_body: RichTextLabel
 var _detail_cost: Label
 var _guidance: Label
@@ -122,6 +128,7 @@ var _job: Label
 var _progress: ProgressBar
 var _inscribe_btn: Button
 var _play_btn: Button
+var _drop_btn: Button
 var _search_btn: Button
 var _chain: OptionButton
 
@@ -131,10 +138,13 @@ func _ready() -> void:
 	_load_config()
 	shelf.load_index()
 	_build_ui()
+	var trial_bytes := Cartridge.wipe_trials()
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://staging"))
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://cartridges"))
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://thumbs"))
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://trials"))
+	if trial_bytes > 0:
+		_log("Cleared trial cache (%s)." % Flashpoint.format_bytes(trial_bytes))
 
 	iq = IQClient.new()
 	add_child(iq)
@@ -161,30 +171,49 @@ func _ready() -> void:
 		_on_search()
 
 
+func _unhandled_input(event: InputEvent) -> void:
+	if _search == null or not event is InputEventKey:
+		return
+	var key := event as InputEventKey
+	if not key.pressed or key.echo:
+		return
+	if key.keycode == KEY_SLASH and not _search.has_focus():
+		_search.grab_focus()
+		_search.select_all()
+		get_viewport().set_input_as_handled()
+
+
 func _build_ui() -> void:
 	set_anchors_and_offsets_preset(PRESET_FULL_RECT)
 
+	var background := ColorRect.new()
+	background.color = TempleTheme.BLACK
+	background.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
+	background.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(background)
+
 	var margin := MarginContainer.new()
 	margin.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
-	margin.add_theme_constant_override("margin_left", 18)
-	margin.add_theme_constant_override("margin_right", 18)
-	margin.add_theme_constant_override("margin_top", 14)
-	margin.add_theme_constant_override("margin_bottom", 12)
+	margin.add_theme_constant_override("margin_left", 16)
+	margin.add_theme_constant_override("margin_right", 16)
+	margin.add_theme_constant_override("margin_top", 10)
+	margin.add_theme_constant_override("margin_bottom", 10)
 	add_child(margin)
 
 	var root := VBoxContainer.new()
 	root.size_flags_horizontal = SIZE_EXPAND_FILL
 	root.size_flags_vertical = SIZE_EXPAND_FILL
-	root.add_theme_constant_override("separation", 10)
+	root.add_theme_constant_override("separation", 8)
 	margin.add_child(root)
 
 	root.add_child(_build_topbar())
+	root.add_child(TempleTheme.rule(TempleTheme.YELLOW))
 
 	var columns := HBoxContainer.new()
 	columns.size_flags_horizontal = SIZE_EXPAND_FILL
 	columns.size_flags_vertical = SIZE_EXPAND_FILL
 	columns.clip_contents = true
-	columns.add_theme_constant_override("separation", 12)
+	columns.add_theme_constant_override("separation", 10)
 	root.add_child(columns)
 
 	columns.add_child(_build_archive_column())
@@ -192,31 +221,45 @@ func _build_ui() -> void:
 	columns.add_child(_build_cabinet_column())
 
 	root.add_child(_build_footer())
+	_apply_archive_view()
 	_clear_detail()
 	_log("Search the archive. Inscribe a title. Play what the chain already holds.")
 
 
 func _build_topbar() -> Control:
 	var bar := HBoxContainer.new()
-	bar.add_theme_constant_override("separation", 16)
+	bar.add_theme_constant_override("separation", 10)
+	bar.alignment = BoxContainer.ALIGNMENT_BEGIN
+
+	var mark := TextureRect.new()
+	if ResourceLoader.exists("res://icon.svg"):
+		mark.texture = load("res://icon.svg")
+	mark.custom_minimum_size = Vector2(40, 40)
+	mark.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	mark.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	mark.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar.add_child(mark)
 
 	var brand := VBoxContainer.new()
 	brand.size_flags_horizontal = SIZE_EXPAND_FILL
 	brand.add_theme_constant_override("separation", 0)
-	var title := TempleTheme.title("FLASH CARTRIDGE")
+	var title := TempleTheme.title(APP_NAME.to_upper())
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	title.clip_text = true
 	brand.add_child(title)
 	var tag := TempleTheme.line("PRESS  ·  CABINET  ·  PLAYER", TempleTheme.MUTED, TempleTheme.SIZE_SMALL)
 	tag.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	brand.add_child(tag)
 	bar.add_child(brand)
 
-	_host_label = _status_chip("HOST …", TempleTheme.AMBER)
-	_ruffle_label = _status_chip("RUFFLE …", TempleTheme.AMBER)
-	_root_label = _status_chip("ROOT …", TempleTheme.AMBER)
-	bar.add_child(_host_label)
-	bar.add_child(_ruffle_label)
-	bar.add_child(_root_label)
+	_host_label = _status_chip(bar, "HOST  …", TempleTheme.AMBER)
+	_host_label.tooltip_text = "GodOnChain host. Writes need it; cached play does not."
+	_ruffle_label = _status_chip(bar, "RUFFLE  …", TempleTheme.AMBER)
+	_ruffle_label.tooltip_text = "Flash player. Downloaded as the latest stable desktop build."
+	_root_label = _status_chip(bar, "ROOT  …", TempleTheme.AMBER)
+	_root_label.tooltip_text = "Operator dbRoot on this chain. Inscribe is refused without it."
+	_spr_label = _status_chip(bar, "SPR  …", TempleTheme.AMBER)
+	_spr_label.tooltip_text = "Shockwave projector, fetched on demand."
 
 	_chain = OptionButton.new()
 	_chain.add_item("MON", 0)
@@ -224,18 +267,21 @@ func _build_topbar() -> Control:
 	_chain.add_item("RH", 2)
 	_chain.select(_chain_index(chain))
 	_chain.item_selected.connect(_on_chain_selected)
-	_chain.custom_minimum_size = Vector2(88, 0)
+	_chain.custom_minimum_size = Vector2(84, 0)
+	_chain.fit_to_longest_item = false
+	_chain.clip_text = true
+	_chain.tooltip_text = "Inscribe and play on this chain."
+	_cap_option_popup(_chain, 100)
 	bar.add_child(_chain)
-	_spr_label = _status_chip("SPR  …", TempleTheme.AMBER)
-	bar.add_child(_spr_label)
 	bar.add_child(TempleTheme.button("REFRESH", _on_refresh))
 	return bar
 
 
-func _status_chip(text: String, colour: Color) -> Label:
+func _status_chip(bar: Control, text: String, colour: Color) -> Label:
 	var label := TempleTheme.cell(text, colour, TempleTheme.SIZE_SMALL)
 	label.size_flags_horizontal = Control.SIZE_SHRINK_END
-	label.custom_minimum_size = Vector2(140, 0)
+	label.custom_minimum_size = Vector2(108, 0)
+	bar.add_child(TempleTheme.wrap_chip(label, colour))
 	return label
 
 
@@ -253,41 +299,38 @@ func _build_archive_column() -> Control:
 
 	_archive_header = TempleTheme.header("ARCHIVE")
 	box.add_child(_archive_header)
+	box.add_child(TempleTheme.rule(TempleTheme.YELLOW))
 
 	var search_row := HBoxContainer.new()
 	search_row.add_theme_constant_override("separation", 8)
 	box.add_child(search_row)
 	_search = LineEdit.new()
-	_search.placeholder_text = "Bowman   or   title:Alien  tag:Arcade  dev:\"Tom Fulp\""
+	_search.placeholder_text = "search  ·  title:  dev:  tag:"
+	_search.tooltip_text = "Bowman   or   title:Alien  tag:Arcade  dev:\"Tom Fulp\""
 	_search.size_flags_horizontal = SIZE_EXPAND_FILL
 	_search.text_submitted.connect(func(_t: String) -> void: _on_search())
 	search_row.add_child(_search)
 	_library = OptionButton.new()
 	_library.add_item("GAMES", 0)
 	_library.add_item("ANIMS", 1)
-	_library.add_item("BOTH", 2)
-	_library.select(2)
+	_library.select(0)
 	_library.custom_minimum_size = Vector2(88, 0)
+	_library.fit_to_longest_item = false
+	_library.clip_text = true
+	_library.tooltip_text = "Games or animations."
 	_library.item_selected.connect(func(_i: int) -> void: _on_search())
+	_cap_option_popup(_library, 120)
 	search_row.add_child(_library)
 	_search_btn = TempleTheme.primary_button("SEARCH", _on_search)
 	search_row.add_child(_search_btn)
-	_view_btn = TempleTheme.button("GRID", _toggle_view)
+	_view_btn = TempleTheme.button("LIST", _toggle_view)
+	_view_btn.tooltip_text = "Switch between poster grid and a text list."
 	search_row.add_child(_view_btn)
 
-	var hint := TempleTheme.line(
-		"Playlists · type-to-search filters · A–Z · or title:  dev:  pub:  tag:",
-		TempleTheme.MUTED,
-		TempleTheme.SIZE_SMALL
-	)
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	box.add_child(hint)
-
-	var filters := HFlowContainer.new()
-	filters.add_theme_constant_override("h_separation", 6)
-	filters.add_theme_constant_override("v_separation", 4)
+	var filters := VBoxContainer.new()
+	filters.add_theme_constant_override("separation", 4)
 	box.add_child(filters)
-	_playlist = _facet_option(180)
+	_playlist = _facet_option(0)
 	for spec: Variant in Flashpoint.PLAYLISTS:
 		var rec: Dictionary = spec
 		_playlist.add_item(str(rec.get("title", rec.get("id", "?"))))
@@ -295,20 +338,20 @@ func _build_archive_column() -> Control:
 	_playlist.select(0)
 	_playlist.item_selected.connect(_on_playlist_selected)
 	filters.add_child(_playlist)
+	var facets := GridContainer.new()
+	facets.columns = 2
+	facets.add_theme_constant_override("h_separation", 6)
+	facets.add_theme_constant_override("v_separation", 4)
+	facets.size_flags_horizontal = SIZE_EXPAND_FILL
+	filters.add_child(facets)
 	_filter_dev = _make_facet("Developer", "dev")
 	_filter_pub = _make_facet("Publisher", "pub")
 	_filter_series = _make_facet("Series", "series")
 	_filter_tag = _make_facet("Tags", "tag")
-	filters.add_child(_filter_dev)
-	filters.add_child(_filter_pub)
-	filters.add_child(_filter_series)
-	filters.add_child(_filter_tag)
-
-	_letter_bar = HFlowContainer.new()
-	_letter_bar.add_theme_constant_override("h_separation", 2)
-	_letter_bar.add_theme_constant_override("v_separation", 2)
-	box.add_child(_letter_bar)
-	_fill_letter_bar()
+	facets.add_child(_filter_dev)
+	facets.add_child(_filter_pub)
+	facets.add_child(_filter_series)
+	facets.add_child(_filter_tag)
 
 	_page_row = HBoxContainer.new()
 	_page_row.add_theme_constant_override("separation", 8)
@@ -323,11 +366,24 @@ func _build_archive_column() -> Control:
 	_next_page_btn = TempleTheme.button("NEXT  >", _on_next_page)
 	_page_row.add_child(_next_page_btn)
 
+	var body := HBoxContainer.new()
+	body.size_flags_horizontal = SIZE_EXPAND_FILL
+	body.size_flags_vertical = SIZE_EXPAND_FILL
+	body.add_theme_constant_override("separation", 4)
+	box.add_child(body)
+
+	_letter_bar = VBoxContainer.new()
+	_letter_bar.add_theme_constant_override("separation", 0)
+	_letter_bar.custom_minimum_size = Vector2(26, 0)
+	body.add_child(_letter_bar)
+	_fill_letter_bar()
+	body.add_child(TempleTheme.rule(TempleTheme.DARK_GREY, true))
+
 	var stack := Control.new()
 	stack.size_flags_horizontal = SIZE_EXPAND_FILL
 	stack.size_flags_vertical = SIZE_EXPAND_FILL
 	stack.clip_contents = true
-	box.add_child(stack)
+	body.add_child(stack)
 
 	_archive = _make_list()
 	_archive.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
@@ -336,7 +392,7 @@ func _build_archive_column() -> Control:
 	stack.add_child(_archive)
 	_apply_archive_view()
 
-	_archive_empty = _empty_label("All Games, a playlist, A–Z, or a search.")
+	_archive_empty = _empty_label("Games, anims, a playlist, A–Z, or a search.")
 	stack.add_child(_archive_empty)
 
 	_load_veil = ColorRect.new()
@@ -365,7 +421,9 @@ func _build_cabinet_column() -> Control:
 	inner.add_child(box)
 
 	_inscribed_header = TempleTheme.header("ON CHAIN")
+	_inscribed_header.add_theme_color_override("font_color", TempleTheme.CYAN)
 	box.add_child(_inscribed_header)
+	box.add_child(TempleTheme.rule(TempleTheme.CYAN))
 
 	var cab_row := HBoxContainer.new()
 	cab_row.add_theme_constant_override("separation", 6)
@@ -382,12 +440,9 @@ func _build_cabinet_column() -> Control:
 	_cabinet_platform.item_selected.connect(func(_i: int) -> void: _on_cabinet_platform())
 	cab_row.add_child(_cabinet_platform)
 	_fill_option(_cabinet_platform, "Platform", PackedStringArray(), "")
-
-	_cabinet_letters = HFlowContainer.new()
-	_cabinet_letters.add_theme_constant_override("h_separation", 2)
-	_cabinet_letters.add_theme_constant_override("v_separation", 2)
-	box.add_child(_cabinet_letters)
-	_fill_cabinet_letters()
+	_cabinet_cached_btn = TempleTheme.button("CACHE", _on_cabinet_cached)
+	_cabinet_cached_btn.tooltip_text = "Show only titles with a local Play cache."
+	cab_row.add_child(_cabinet_cached_btn)
 
 	_cabinet_page_row = HBoxContainer.new()
 	_cabinet_page_row.add_theme_constant_override("separation", 8)
@@ -402,16 +457,30 @@ func _build_cabinet_column() -> Control:
 	_cabinet_next = TempleTheme.button(">", _on_cabinet_next)
 	_cabinet_page_row.add_child(_cabinet_next)
 
+	var body := HBoxContainer.new()
+	body.size_flags_horizontal = SIZE_EXPAND_FILL
+	body.size_flags_vertical = SIZE_EXPAND_FILL
+	body.add_theme_constant_override("separation", 4)
+	box.add_child(body)
+
+	_cabinet_letters = VBoxContainer.new()
+	_cabinet_letters.add_theme_constant_override("separation", 0)
+	_cabinet_letters.custom_minimum_size = Vector2(26, 0)
+	body.add_child(_cabinet_letters)
+	_fill_cabinet_letters()
+	body.add_child(TempleTheme.rule(TempleTheme.DARK_GREY, true))
+
 	var stack := Control.new()
 	stack.size_flags_horizontal = SIZE_EXPAND_FILL
 	stack.size_flags_vertical = SIZE_EXPAND_FILL
 	stack.clip_contents = true
-	box.add_child(stack)
+	body.add_child(stack)
 
 	_inscribed_list = _make_list()
 	_inscribed_list.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
 	_inscribed_list.item_selected.connect(_on_inscribed_selected)
 	_inscribed_list.item_activated.connect(func(_i: int) -> void: _on_play())
+	_inscribed_list.item_clicked.connect(_on_inscribed_clicked)
 	stack.add_child(_inscribed_list)
 
 	_inscribed_empty = _empty_label("Nothing inscribed\non this chain yet.")
@@ -421,7 +490,7 @@ func _build_cabinet_column() -> Control:
 
 func _build_stage() -> Control:
 	var panel := TempleTheme.panel()
-	panel.size_flags_stretch_ratio = 1.45
+	panel.size_flags_stretch_ratio = 1.6
 	var inner := _padded()
 	panel.add_child(inner)
 
@@ -430,54 +499,94 @@ func _build_stage() -> Control:
 	inner.add_child(box)
 
 	box.add_child(TempleTheme.header("STAGE"))
+	box.add_child(TempleTheme.rule(TempleTheme.YELLOW))
+
+	var crt := TempleTheme.screen()
+	crt.size_flags_stretch_ratio = 1.7
+	crt.custom_minimum_size = Vector2(0, 220)
+	box.add_child(crt)
 
 	var shot_wrap := Control.new()
-	shot_wrap.custom_minimum_size = Vector2(0, 250)
 	shot_wrap.size_flags_horizontal = SIZE_EXPAND_FILL
-	box.add_child(shot_wrap)
+	shot_wrap.size_flags_vertical = SIZE_EXPAND_FILL
+	crt.add_child(shot_wrap)
 
 	var frame := ColorRect.new()
-	frame.color = Color("111111")
+	frame.color = Color("080808")
 	frame.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
 	shot_wrap.add_child(frame)
 
 	_shot = TextureRect.new()
 	_shot.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
 	_shot.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-	_shot.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_COVERED
+	_shot.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
 	shot_wrap.add_child(_shot)
 
-	_shot_empty = TempleTheme.line("NO CARTRIDGE SELECTED", TempleTheme.DARK_GREY, TempleTheme.SIZE_SMALL)
+	var scan := TextureRect.new()
+	scan.texture = TempleTheme.scan_texture()
+	scan.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	scan.stretch_mode = TextureRect.STRETCH_TILE
+	scan.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
+	scan.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	shot_wrap.add_child(scan)
+
+	_shot_empty = TempleTheme.line("NO CARTRIDGE SELECTED", TempleTheme.MUTED, TempleTheme.SIZE_SMALL)
 	_shot_empty.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
 	_shot_empty.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	shot_wrap.add_child(_shot_empty)
+
+	_shot_marquee_bg = ColorRect.new()
+	_shot_marquee_bg.color = Color(0, 0, 0, 0.82)
+	_shot_marquee_bg.set_anchors_and_offsets_preset(PRESET_BOTTOM_WIDE)
+	_shot_marquee_bg.offset_top = -26
+	_shot_marquee_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_shot_marquee_bg.visible = false
+	shot_wrap.add_child(_shot_marquee_bg)
+	_shot_marquee = TempleTheme.cell("", TempleTheme.YELLOW, TempleTheme.SIZE_SMALL)
+	_shot_marquee.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_shot_marquee.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
+	_shot_marquee.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_shot_marquee_bg.add_child(_shot_marquee)
 
 	_detail_chip = TempleTheme.cell("", TempleTheme.CYAN, TempleTheme.SIZE_SMALL)
 	box.add_child(_detail_chip)
 
 	_detail_title = TempleTheme.line("", TempleTheme.YELLOW, TempleTheme.SIZE_DISPLAY)
 	_detail_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_detail_title.clip_text = true
+	_detail_title.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	box.add_child(_detail_title)
 
-	_detail_meta = TempleTheme.line("", TempleTheme.GREY, TempleTheme.SIZE_SMALL)
-	_detail_meta.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	box.add_child(_detail_meta)
+	_meta_box = HFlowContainer.new()
+	_meta_box.add_theme_constant_override("h_separation", 6)
+	_meta_box.add_theme_constant_override("v_separation", 4)
+	box.add_child(_meta_box)
 
 	_detail_body = RichTextLabel.new()
 	_detail_body.fit_content = false
 	_detail_body.scroll_following = false
 	_detail_body.bbcode_enabled = false
 	_detail_body.size_flags_vertical = SIZE_EXPAND_FILL
-	_detail_body.custom_minimum_size = Vector2(0, 80)
+	_detail_body.size_flags_stretch_ratio = 0.45
+	_detail_body.custom_minimum_size = Vector2(0, 56)
 	box.add_child(_detail_body)
 
-	_tag_box = HBoxContainer.new()
-	_tag_box.add_theme_constant_override("separation", 6)
+	_tag_box = HFlowContainer.new()
+	_tag_box.add_theme_constant_override("h_separation", 6)
+	_tag_box.add_theme_constant_override("v_separation", 4)
 	box.add_child(_tag_box)
 
+	var cost_row := HBoxContainer.new()
+	cost_row.add_theme_constant_override("separation", 8)
+	box.add_child(cost_row)
 	_detail_cost = TempleTheme.line("", TempleTheme.AMBER, TempleTheme.SIZE_SMALL)
 	_detail_cost.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	box.add_child(_detail_cost)
+	_detail_cost.size_flags_horizontal = SIZE_EXPAND_FILL
+	cost_row.add_child(_detail_cost)
+	_drop_btn = TempleTheme.quiet_button("DROP CACHE", _on_drop_cache)
+	_drop_btn.tooltip_text = "Delete this title's extracted Play cache. The chain copy stays."
+	_drop_btn.visible = false
+	cost_row.add_child(_drop_btn)
 
 	var actions := HBoxContainer.new()
 	actions.add_theme_constant_override("separation", 8)
@@ -495,6 +604,8 @@ func _build_footer() -> Control:
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 4)
 
+	box.add_child(TempleTheme.rule(TempleTheme.DARK_GREY))
+
 	var job_row := HBoxContainer.new()
 	job_row.add_theme_constant_override("separation", 10)
 	box.add_child(job_row)
@@ -503,15 +614,19 @@ func _build_footer() -> Control:
 	_progress.max_value = 100
 	_progress.value = 0
 	_progress.show_percentage = false
-	_progress.custom_minimum_size = Vector2(0, 14)
+	_progress.custom_minimum_size = Vector2(0, 12)
 	_progress.size_flags_horizontal = SIZE_EXPAND_FILL
+	_progress.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	job_row.add_child(_progress)
 	_job = TempleTheme.cell("Ready.", TempleTheme.MUTED, TempleTheme.SIZE_SMALL)
-	_job.custom_minimum_size = Vector2(280, 0)
+	_job.custom_minimum_size = Vector2(240, 0)
 	job_row.add_child(_job)
+	_log_btn = TempleTheme.button("LOG  +", _toggle_log)
+	_log_btn.tooltip_text = "Show or hide the console."
+	job_row.add_child(_log_btn)
 
 	_guidance = TempleTheme.line(
-		"There is no unpublish. Inscribing pays createTable to the operators.",
+		"There is no unpublish.",
 		TempleTheme.AMBER,
 		TempleTheme.SIZE_SMALL
 	)
@@ -522,8 +637,9 @@ func _build_footer() -> Control:
 	_console.fit_content = false
 	_console.scroll_following = true
 	_console.bbcode_enabled = false
-	_console.custom_minimum_size = Vector2(0, 72)
+	_console.custom_minimum_size = Vector2(0, 88)
 	_console.size_flags_vertical = Control.SIZE_SHRINK_END
+	_console.visible = false
 	box.add_child(_console)
 	return box
 
@@ -545,7 +661,7 @@ func _make_list() -> ItemList:
 	list.size_flags_horizontal = SIZE_EXPAND_FILL
 	list.size_flags_vertical = SIZE_EXPAND_FILL
 	list.select_mode = ItemList.SELECT_SINGLE
-	list.fixed_icon_size = Vector2i(48, 48)
+	list.fixed_icon_size = Vector2i(80, 80)
 	list.same_column_width = true
 	list.auto_width = false
 	list.auto_height = false
@@ -556,32 +672,43 @@ func _make_list() -> ItemList:
 
 func _facet_option(width: int) -> OptionButton:
 	var btn := OptionButton.new()
-	btn.custom_minimum_size = Vector2(width, 0)
+	if width > 0:
+		btn.custom_minimum_size = Vector2(width, 0)
 	btn.size_flags_horizontal = SIZE_EXPAND_FILL
 	btn.fit_to_longest_item = false
 	btn.clip_text = true
+	_cap_option_popup(btn, 280)
 	return btn
 
 
+func _cap_option_popup(btn: OptionButton, max_width: int) -> void:
+	var pop := btn.get_popup()
+	pop.max_size = Vector2i(max_width, 360)
+	pop.hide_on_item_selection = true
+
+
 func _apply_archive_view() -> void:
-	if _archive == null:
+	_apply_list_view(_archive)
+	_apply_list_view(_inscribed_list)
+	if _view_btn:
+		_view_btn.text = "LIST" if _view_grid else "GRID"
+
+
+func _apply_list_view(list: ItemList) -> void:
+	if list == null:
 		return
 	if _view_grid:
-		_archive.icon_mode = ItemList.ICON_MODE_TOP
-		_archive.fixed_icon_size = Vector2i(72, 72)
-		_archive.max_columns = 0
-		_archive.fixed_column_width = 120
-		_archive.max_text_lines = 2
-		if _view_btn:
-			_view_btn.text = "GRID"
+		list.icon_mode = ItemList.ICON_MODE_TOP
+		list.fixed_icon_size = Vector2i(80, 80)
+		list.max_columns = 0
+		list.fixed_column_width = 108
+		list.max_text_lines = 2
 	else:
-		_archive.icon_mode = ItemList.ICON_MODE_LEFT
-		_archive.fixed_icon_size = Vector2i(48, 48)
-		_archive.max_columns = 1
-		_archive.fixed_column_width = 0
-		_archive.max_text_lines = 1
-		if _view_btn:
-			_view_btn.text = "LIST"
+		list.icon_mode = ItemList.ICON_MODE_LEFT
+		list.fixed_icon_size = Vector2i(40, 40)
+		list.max_columns = 1
+		list.fixed_column_width = 0
+		list.max_text_lines = 1
 
 
 func _toggle_view() -> void:
@@ -592,6 +719,12 @@ func _toggle_view() -> void:
 		var rec: Variant = _archive.get_item_metadata(i)
 		if rec is Dictionary:
 			_archive.set_item_text(i, _archive_label(rec))
+	if _inscribed_list == null:
+		return
+	for i in _inscribed_list.item_count:
+		var rec: Variant = _inscribed_list.get_item_metadata(i)
+		if rec is Dictionary:
+			_inscribed_list.set_item_text(i, _cabinet_label(rec))
 
 
 func _archive_label(rec: Dictionary) -> String:
@@ -603,15 +736,20 @@ func _archive_label(rec: Dictionary) -> String:
 func _placeholder_icon() -> Texture2D:
 	if _placeholder_tex != null:
 		return _placeholder_tex
-	var img := Image.create(48, 48, false, Image.FORMAT_RGBA8)
-	img.fill(Color("111111"))
+	var img := Image.create(80, 80, false, Image.FORMAT_RGBA8)
+	img.fill(Color("080808"))
 	var edge := TempleTheme.YELLOW
-	for x in 48:
+	var notch := TempleTheme.DARK_GREY
+	for x in 80:
 		img.set_pixel(x, 0, edge)
-		img.set_pixel(x, 47, edge)
-	for y in 48:
+		img.set_pixel(x, 79, edge)
+		img.set_pixel(x, 18, notch)
+	for y in 80:
 		img.set_pixel(0, y, edge)
-		img.set_pixel(47, y, edge)
+		img.set_pixel(79, y, edge)
+	for x in range(28, 52):
+		img.set_pixel(x, 70, edge)
+		img.set_pixel(x, 71, edge)
 	_placeholder_tex = ImageTexture.create_from_image(img)
 	return _placeholder_tex
 
@@ -694,11 +832,6 @@ func _composed_query() -> String:
 	return " ".join(parts)
 
 
-func _library_filter_or_arcade() -> String:
-	var lib := _library_filter()
-	return lib if not lib.is_empty() else "arcade"
-
-
 func _list_line(rec: Dictionary) -> String:
 	var title := str(rec.get("title", "?"))
 	var dev := str(rec.get("developer", ""))
@@ -751,13 +884,25 @@ func _harvest_facets(hits: Array) -> void:
 
 
 func _note_facet(into: Dictionary, raw: Variant) -> void:
+	for name in _facet_names(raw):
+		into[name] = true
+
+
+func _facet_names(raw: Variant) -> PackedStringArray:
+	var out: PackedStringArray = []
+	if raw is Array:
+		for item: Variant in raw:
+			for name in _facet_names(item):
+				out.append(name)
+		return out
 	var text := str(raw).strip_edges()
 	if text.is_empty() or text == "[]":
-		return
+		return out
 	for chunk in text.replace(";", ",").split(","):
 		var name := chunk.strip_edges()
 		if not name.is_empty():
-			into[name] = true
+			out.append(name)
+	return out
 
 
 func _sorted_keys(d: Dictionary) -> PackedStringArray:
@@ -777,7 +922,7 @@ func _load_tag_dropdown() -> void:
 
 
 func _empty_label(text: String) -> Label:
-	var label := TempleTheme.line(text, TempleTheme.DARK_GREY, TempleTheme.SIZE_SMALL)
+	var label := TempleTheme.line(text, TempleTheme.MUTED, TempleTheme.SIZE_SMALL)
 	label.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
 	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -786,32 +931,27 @@ func _empty_label(text: String) -> Label:
 
 func _connect_host() -> void:
 	if await iq.discover(APP_NAME):
-		_host_label.text = "HOST  OK"
-		_host_label.add_theme_color_override("font_color", TempleTheme.GREEN)
+		TempleTheme.paint_chip(_host_label, "HOST  OK", TempleTheme.GREEN)
 	else:
 		_on_host_missing(iq.last_error)
 
 
 func _on_host_missing(reason: String) -> void:
-	_host_label.text = "HOST  OFF"
-	_host_label.add_theme_color_override("font_color", TempleTheme.BRIGHT_RED)
+	TempleTheme.paint_chip(_host_label, "HOST  OFF", TempleTheme.BRIGHT_RED)
 	kindled = false
 	_update_root_chip()
 	_log(reason)
 
 
 func _ensure_ruffle() -> void:
-	_ruffle_label.text = "RUFFLE  …"
-	_ruffle_label.add_theme_color_override("font_color", TempleTheme.AMBER)
+	TempleTheme.paint_chip(_ruffle_label, "RUFFLE  …", TempleTheme.AMBER)
 	_set_job("Fetching Ruffle…")
 	var ok := await ruffle.ensure()
 	if ok:
-		_ruffle_label.text = "RUFFLE  %s" % ruffle.tag
-		_ruffle_label.add_theme_color_override("font_color", TempleTheme.GREEN)
+		TempleTheme.paint_chip(_ruffle_label, "RUFFLE  %s" % ruffle.tag, TempleTheme.GREEN)
 		_set_job("Ready.")
 	else:
-		_ruffle_label.text = "RUFFLE  OFF"
-		_ruffle_label.add_theme_color_override("font_color", TempleTheme.BRIGHT_RED)
+		TempleTheme.paint_chip(_ruffle_label, "RUFFLE  OFF", TempleTheme.BRIGHT_RED)
 		_set_job(ruffle.last_error)
 		_log(ruffle.last_error)
 
@@ -828,15 +968,12 @@ func _refresh_kindled() -> void:
 
 func _update_root_chip() -> void:
 	if not iq.is_available():
-		_root_label.text = "ROOT  —"
-		_root_label.add_theme_color_override("font_color", TempleTheme.MUTED)
+		TempleTheme.paint_chip(_root_label, "ROOT  —", TempleTheme.MUTED)
 		return
 	if kindled:
-		_root_label.text = "ROOT  %s" % chain.to_upper()
-		_root_label.add_theme_color_override("font_color", TempleTheme.GREEN)
+		TempleTheme.paint_chip(_root_label, "ROOT  %s" % chain.to_upper(), TempleTheme.GREEN)
 	else:
-		_root_label.text = "ROOT  WAIT"
-		_root_label.add_theme_color_override("font_color", TempleTheme.AMBER)
+		TempleTheme.paint_chip(_root_label, "ROOT  WAIT", TempleTheme.AMBER)
 
 
 func _on_chain_selected(index: int) -> void:
@@ -873,6 +1010,8 @@ func _on_refresh() -> void:
 
 
 func _on_search() -> void:
+	if flashpoint == null:
+		return
 	_search_ticket += 1
 	var ticket := _search_ticket
 	_set_busy(true)
@@ -902,9 +1041,8 @@ func _on_search() -> void:
 	var limit := 0
 	var library := _library_filter()
 	if q.is_empty() and _browse_letter.is_empty():
-		library = _library_filter_or_arcade()
 		if not flashpoint.has_catalog(library):
-			_set_searching(true, "Loading All Games…")
+			_set_searching(true, "Loading %s…" % _library_all_title())
 		await _load_all_games(ticket, library)
 		return
 	var wait := "Searching…"
@@ -920,7 +1058,7 @@ func _on_search() -> void:
 		return
 	if q.is_empty() and not _browse_letter.is_empty():
 		q = "title:%s" % _browse_letter
-	_log(_search_log_line(q if not q.is_empty() else "All Games"))
+	_log(_search_log_line(q if not q.is_empty() else _library_all_title()))
 	var found: Array = await flashpoint.search(q, library, limit, "", false, Flashpoint.LIST_FIELDS)
 	if ticket != _search_ticket:
 		return
@@ -928,30 +1066,30 @@ func _on_search() -> void:
 
 
 func _warmup_catalog() -> void:
-	_warm_lib = _library_filter_or_arcade()
+	_warm_lib = _library_filter()
 	_warm_done = false
 	_warm_rows = []
 	if flashpoint.has_catalog(_warm_lib):
 		_set_job("Opening catalog…")
 		_warm_rows = await flashpoint.load_catalog_async(_warm_lib)
 		_warm_done = true
-		if _still_all_games() and _archive_hits.is_empty() and not _warm_rows.is_empty():
+		if _still_all_games(_warm_lib) and _archive_hits.is_empty() and not _warm_rows.is_empty():
 			_show_search_hits(_warm_rows, true)
 		if not flashpoint.catalog_is_fresh(_warm_lib):
 			_refresh_catalog_background(_warm_lib)
 		return
-	_set_searching(true, "Loading All Games…")
+	_set_searching(true, "Loading %s…" % _library_all_title())
 	var first: Array = await flashpoint.search("", _warm_lib, PAGE_SIZE, "", false, Flashpoint.LIST_FIELDS)
 	_warm_rows = first
 	_warm_done = true
-	if _still_all_games() and not first.is_empty():
+	if _still_all_games(_warm_lib) and not first.is_empty():
 		_show_search_hits(first)
 	_set_job("%d titles on this page. Fetching the full catalog…" % first.size())
 	var rest: Array = await flashpoint.search("", _warm_lib, 0, "", false, Flashpoint.LIST_FIELDS)
 	if rest.size() > first.size():
 		await flashpoint.save_catalog_async(_warm_lib, rest)
 		_warm_rows = rest
-		if _still_all_games():
+		if _still_all_games(_warm_lib):
 			_show_search_hits(rest, true)
 
 
@@ -962,7 +1100,7 @@ func _refresh_catalog_background(library: String) -> void:
 		return
 	await flashpoint.save_catalog_async(library, fresh)
 	_warm_rows = fresh
-	if _still_all_games():
+	if _still_all_games(library):
 		var keep := _archive_page
 		_show_search_hits(fresh, true)
 		_archive_page = keep
@@ -978,7 +1116,7 @@ func _load_all_games(ticket: int, library: String) -> void:
 		if not _warm_rows.is_empty():
 			_show_search_hits(_warm_rows, true)
 			return
-	_log("All Games — local index first, same idea as Flashpoint’s on-disk database.")
+	_log("%s — local index first, same idea as Flashpoint’s on-disk database." % _library_all_title())
 	var cached: Array = await flashpoint.load_catalog_async(library)
 	if not cached.is_empty():
 		_show_search_hits(cached, true)
@@ -999,15 +1137,16 @@ func _load_all_games(ticket: int, library: String) -> void:
 		_set_job("%d titles." % first.size())
 		return
 	await flashpoint.save_catalog_async(library, rest)
-	if _still_all_games():
+	if _still_all_games(library):
 		_show_search_hits(rest, true)
 
 
-func _still_all_games() -> bool:
+func _still_all_games(library: String) -> bool:
 	return (
 		_playlist_id == "all"
 		and _composed_query().is_empty()
 		and _browse_letter.is_empty()
+		and _library_filter() == library
 	)
 
 
@@ -1064,7 +1203,7 @@ func _paint_archive_page() -> void:
 	if _playlist_id != "all":
 		head += "  ·  %s" % _playlist_title()
 	elif _search.text.strip_edges().is_empty() and _sel_dev.is_empty() and _sel_pub.is_empty() and _sel_series.is_empty() and _sel_tag.is_empty():
-		head += "  ·  ALL GAMES"
+		head += "  ·  %s" % _library_all_title().to_upper()
 	if not _browse_letter.is_empty():
 		head += "  ·  %s" % _browse_letter
 	if total > PAGE_SIZE:
@@ -1167,16 +1306,17 @@ func _fill_detail_from_archive(rec: Dictionary) -> void:
 	var uuid := str(rec.get("id", ""))
 	var inscribed := _inscribed_by_uuid.has(uuid)
 	_detail_title.text = str(rec.get("title", "Untitled"))
+	_set_marquee(_detail_title.text)
 	_detail_chip.text = "INSCRIBED" if inscribed else "AVAILABLE"
 	_detail_chip.add_theme_color_override(
 		"font_color", TempleTheme.CYAN if inscribed else TempleTheme.GREEN
 	)
-	_detail_meta.text = _meta_line(rec)
+	_fill_credits(rec)
 	_detail_body.text = _description(rec)
 	_fill_tags(rec)
 	_preview_bytes = -1
 	if inscribed:
-		_detail_cost.text = "Already on this chain. Play it."
+		_detail_cost.text = "Already on this chain. Play it.\n%s" % _cache_cost_line(_selected_table)
 	else:
 		_detail_cost.text = "Checking size…"
 		_load_size(uuid, str(rec.get("launchCommand", "")))
@@ -1190,10 +1330,11 @@ func _fill_detail_from_archive(rec: Dictionary) -> void:
 func _fill_detail_from_inscribed(table: String, meta: Dictionary) -> void:
 	var title := str(meta.get("title", table))
 	_detail_title.text = title
+	_set_marquee(title)
 	_detail_chip.text = "ON CHAIN  ·  %s" % chain.to_upper()
 	_detail_chip.add_theme_color_override("font_color", TempleTheme.CYAN)
 	var uuid := str(meta.get("uuid", ""))
-	_detail_meta.text = _meta_line(meta)
+	_fill_credits(meta)
 	var sha := str(meta.get("sha256", ""))
 	_detail_body.text = "Table %s\nSHA-256  %s" % [table, sha if not sha.is_empty() else "—"]
 	_clear_tags()
@@ -1206,11 +1347,11 @@ func _fill_detail_from_inscribed(table: String, meta: Dictionary) -> void:
 		var n := int(meta.get("bytes", 0))
 		if n > 0:
 			_detail_cost.text = (
-				"On-chain GameZIP %s. Play from cache, or fetch from the chain."
-				% Flashpoint.format_bytes(n)
+				"On-chain GameZIP %s. %s"
+				% [Flashpoint.format_bytes(n), _cache_cost_line(table)]
 			)
 		else:
-			_detail_cost.text = "Play from the local cache, or fetch the zip from the chain."
+			_detail_cost.text = _cache_cost_line(table)
 	_shot.texture = null
 	_shot_empty.text = "LOADING ART…"
 	_shot_empty.visible = true
@@ -1227,8 +1368,9 @@ func _clear_detail() -> void:
 	_selected_entry = {}
 	_selected_table = ""
 	_detail_title.text = "Select a title"
+	_set_marquee("")
 	_detail_chip.text = ""
-	_detail_meta.text = "The stage shows art, credits, and the action for whatever you pick."
+	_fill_credits({}, "The stage shows art, credits, and the action for whatever you pick.")
 	_detail_body.text = ""
 	_detail_cost.text = ""
 	_preview_bytes = -1
@@ -1239,16 +1381,66 @@ func _clear_detail() -> void:
 	_refresh_detail_actions()
 
 
-func _meta_line(rec: Dictionary) -> String:
-	var bits: PackedStringArray = []
+func _set_marquee(text: String) -> void:
+	if _shot_marquee == null:
+		return
+	_shot_marquee.text = text
+	if _shot_marquee_bg:
+		_shot_marquee_bg.visible = not text.is_empty()
+
+
+func _fill_credits(rec: Dictionary, empty_msg: String = "") -> void:
+	_clear_credits()
+	if _meta_box == null:
+		return
+	if rec.is_empty() and not empty_msg.is_empty():
+		var hint := TempleTheme.line(empty_msg, TempleTheme.GREY, TempleTheme.SIZE_SMALL)
+		hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		hint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_meta_box.add_child(hint)
+		return
 	var plat := Flashpoint.platform_label(rec)
 	if plat != "Unknown":
-		bits.append(plat)
-	for key in ["developer", "publisher", "releaseDate"]:
-		var value := str(rec.get(key, "")).strip_edges()
-		if not value.is_empty():
-			bits.append(value)
-	return "  ·  ".join(bits)
+		_meta_add_label(plat)
+	_meta_add_facet("developer", "dev", "Developer", rec)
+	_meta_add_facet("publisher", "pub", "Publisher", rec)
+	_meta_add_facet("series", "series", "Series", rec)
+	var date := str(rec.get("releaseDate", "")).strip_edges()
+	if not date.is_empty():
+		_meta_add_label(date)
+
+
+func _meta_add_sep() -> void:
+	if _meta_box.get_child_count() == 0:
+		return
+	var sep := TempleTheme.line("·", TempleTheme.DARK_GREY, TempleTheme.SIZE_SMALL)
+	sep.autowrap_mode = TextServer.AUTOWRAP_OFF
+	sep.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	sep.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	sep.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_meta_box.add_child(sep)
+
+
+func _meta_add_label(text: String) -> void:
+	_meta_add_sep()
+	var label := TempleTheme.line(text, TempleTheme.GREY, TempleTheme.SIZE_SMALL)
+	label.autowrap_mode = TextServer.AUTOWRAP_OFF
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_meta_box.add_child(label)
+
+
+func _meta_add_facet(field: String, kind: String, title: String, rec: Dictionary) -> void:
+	for name in _facet_names(rec.get(field, "")):
+		_meta_add_sep()
+		var b := TempleTheme.tag_button(name, _search_facet.bind(kind, name))
+		b.tooltip_text = "%s  ·  search archive" % title
+		_meta_box.add_child(b)
+
+
+func _clear_credits() -> void:
+	_clear_box(_meta_box)
 
 
 func _description(rec: Dictionary) -> String:
@@ -1259,13 +1451,13 @@ func _description(rec: Dictionary) -> String:
 
 
 func _library_filter() -> String:
-	match _library.selected:
-		0:
-			return "arcade"
-		1:
-			return "theatre"
-		_:
-			return ""
+	if _library != null and _library.selected == 1:
+		return "theatre"
+	return "arcade"
+
+
+func _library_all_title() -> String:
+	return "All Anims" if _library_filter() == "theatre" else "All Games"
 
 
 func _format_mark(rec: Dictionary) -> String:
@@ -1280,10 +1472,7 @@ func _fill_letter_bar() -> void:
 	for i in range(26):
 		keys.append(String.chr(65 + i))
 	for letter in keys:
-		var b := Button.new()
-		b.text = letter
-		b.custom_minimum_size = Vector2(26, 22)
-		b.add_theme_font_size_override("font_size", 13)
+		var b := TempleTheme.index_button(letter, TempleTheme.YELLOW)
 		b.pressed.connect(_on_letter.bind(letter))
 		_letter_bar.add_child(b)
 		_letter_buttons[letter] = b
@@ -1306,7 +1495,9 @@ func _paint_letters() -> void:
 			b.add_theme_stylebox_override("normal", TempleTheme._solid(TempleTheme.YELLOW))
 			b.add_theme_color_override("font_color", TempleTheme.BLACK)
 		else:
-			b.remove_theme_stylebox_override("normal")
+			b.add_theme_stylebox_override(
+				"normal", TempleTheme._box(Color(0, 0, 0, 0), Color(0, 0, 0, 0), 1, 0, 0)
+			)
 			b.add_theme_color_override("font_color", TempleTheme.YELLOW)
 
 
@@ -1319,7 +1510,7 @@ func _search_log_line(q: String) -> String:
 	if not _browse_letter.is_empty():
 		bits.append("letter %s" % _browse_letter)
 	if bits.is_empty():
-		return "Browsing All Games…"
+		return "Browsing %s…" % _library_all_title()
 	return "Searching Flashpoint %s…" % " · ".join(bits)
 
 
@@ -1396,28 +1587,63 @@ func _fill_tags(rec: Dictionary) -> void:
 		return
 	var n := 0
 	for t: Variant in tags:
-		if n >= 6:
+		if n >= 8:
 			break
 		var label := str(t).strip_edges()
 		if label.is_empty():
 			continue
-		var b := TempleTheme.button(label, _search_tag.bind(label))
-		b.add_theme_font_size_override("font_size", TempleTheme.SIZE_SMALL)
-		_tag_box.add_child(b)
+		_tag_box.add_child(TempleTheme.tag_button(label, _search_facet.bind("tag", label)))
 		n += 1
 
 
 func _clear_tags() -> void:
-	if _tag_box == null:
+	_clear_box(_tag_box)
+
+
+func _clear_box(box: Container) -> void:
+	if box == null:
 		return
-	for child in _tag_box.get_children():
-		child.queue_free()
+	for child in box.get_children():
+		box.remove_child(child)
+		child.free()
 
 
-func _search_tag(tag: String) -> void:
-	_sel_tag = tag.strip_edges()
+func _search_facet(kind: String, value: String) -> void:
+	var v := value.strip_edges()
+	_sel_dev = ""
+	_sel_pub = ""
+	_sel_series = ""
+	_sel_tag = ""
+	if _filter_dev:
+		_filter_dev.set_value("")
+	if _filter_pub:
+		_filter_pub.set_value("")
+	if _filter_series:
+		_filter_series.set_value("")
 	if _filter_tag:
-		_filter_tag.set_value(_sel_tag)
+		_filter_tag.set_value("")
+	if _search:
+		_search.text = ""
+	if not _browse_letter.is_empty():
+		_browse_letter = ""
+		_paint_letters()
+	match kind:
+		"dev":
+			_sel_dev = v
+			if _filter_dev:
+				_filter_dev.set_value(v)
+		"pub":
+			_sel_pub = v
+			if _filter_pub:
+				_filter_pub.set_value(v)
+		"series":
+			_sel_series = v
+			if _filter_series:
+				_filter_series.set_value(v)
+		"tag":
+			_sel_tag = v
+			if _filter_tag:
+				_filter_tag.set_value(v)
 	_on_search()
 
 
@@ -1479,6 +1705,11 @@ func _refresh_detail_actions() -> void:
 		_play_btn.text = "TRY"
 	if archive_pick and FlashpointHost.needs_flashpoint(_selected_entry):
 		_play_btn.text = "TRY IN FP"
+	var cached := not _selected_table.is_empty() and Cartridge.has_play_cache(_selected_table)
+	if _drop_btn:
+		_drop_btn.visible = cached
+		_drop_btn.disabled = _busy or not cached
+		_drop_btn.tooltip_text = "Delete this title's extracted Play cache. The chain copy stays."
 
 
 func _on_inscribe() -> void:
@@ -1514,7 +1745,7 @@ func _on_inscribe() -> void:
 		_log("%s — %s" % [Flashpoint.format_bytes(_preview_bytes), quote])
 		if not await _confirm(
 			(
-				"There is no unpublish.\n\nGameZIP %s\n%s\ncreateTable pays the operators, not you.\n\nInscribe “%s” on %s?"
+				"There is no unpublish.\n\nGameZIP %s\n%s\n\nInscribe “%s” on %s?"
 				% [
 					Flashpoint.format_bytes(_preview_bytes),
 					quote,
@@ -1563,7 +1794,7 @@ func _on_inscribe() -> void:
 		_log(quote)
 		if not await _confirm(
 			(
-				"There is no unpublish.\n\n%s\ncreateTable pays the operators, not you.\n\nInscribe “%s” on %s?"
+				"There is no unpublish.\n\n%s\n\nInscribe “%s” on %s?"
 				% [quote, str(entry.get("title", uuid)), chain.to_upper()]
 			)
 		):
@@ -1618,6 +1849,38 @@ func _on_play() -> void:
 			await _trial_play(_selected_entry)
 			return
 	await _play_inscribed()
+
+
+func _on_drop_cache() -> void:
+	if _busy:
+		return
+	var table := _selected_table.strip_edges()
+	if table.is_empty() or not Cartridge.has_play_cache(table):
+		_log("No local Play cache for this title.")
+		return
+	var title := str(_selected_entry.get("title", table)).strip_edges()
+	if title.is_empty():
+		title = table
+	if not await _confirm(
+		(
+			"Delete the local Play cache for “%s”?\n\nThe chain still holds the GameZIP. Play will fetch it again."
+			% title
+		),
+		"DROP CACHE"
+	):
+		_set_job("Drop cache cancelled.")
+		return
+	var n := Cartridge.drop_play_cache(table)
+	shelf.forget(table)
+	_log("Dropped Play cache for %s (%s)." % [table, Flashpoint.format_bytes(n)])
+	_set_job("Dropped Play cache (%s)." % Flashpoint.format_bytes(n))
+	if _selected_kind == "inscribed":
+		_fill_detail_from_inscribed(_selected_table, _selected_entry)
+	elif _selected_kind == "archive":
+		_fill_detail_from_archive(_selected_entry)
+	else:
+		_refresh_detail_actions()
+	_paint_cabinet()
 
 
 func _trial_play(entry: Dictionary) -> void:
@@ -1712,11 +1975,13 @@ func _play_inscribed() -> void:
 
 func _refresh_spr_chip() -> void:
 	if spr != null and spr.has_runtime():
-		_spr_label.text = "SPR  %s" % (spr.tag if not spr.tag.is_empty() else "OK")
-		_spr_label.add_theme_color_override("font_color", TempleTheme.GREEN)
+		TempleTheme.paint_chip(
+			_spr_label,
+			"SPR  %s" % (spr.tag if not spr.tag.is_empty() else "OK"),
+			TempleTheme.GREEN
+		)
 	else:
-		_spr_label.text = "SPR  —"
-		_spr_label.add_theme_color_override("font_color", TempleTheme.AMBER)
+		TempleTheme.paint_chip(_spr_label, "SPR  —", TempleTheme.AMBER)
 
 
 func _launch_via_flashpoint(entry: Dictionary, trial: bool) -> bool:
@@ -1741,8 +2006,7 @@ func _launch_via_flashpoint(entry: Dictionary, trial: bool) -> bool:
 
 func _launch_via_spr(dest: String, meta: Dictionary, trial: bool) -> void:
 	_set_job("Fetching Shockwave projector…")
-	_spr_label.text = "SPR  …"
-	_spr_label.add_theme_color_override("font_color", TempleTheme.AMBER)
+	TempleTheme.paint_chip(_spr_label, "SPR  …", TempleTheme.AMBER)
 	var ok := await spr.ensure(_on_progress)
 	_refresh_spr_chip()
 	if not ok:
@@ -1901,6 +2165,14 @@ func _register_cabinet_row(table: String, meta: Dictionary) -> void:
 		_inscribed_by_uuid[uuid] = rec
 
 
+func _cabinet_label(rec: Dictionary) -> String:
+	var title := str(rec.get("title", rec.get("table", "?")))
+	if _view_grid:
+		return title
+	var plat := Flashpoint.platform_label(rec.get("meta", {}))
+	return title if plat == "Unknown" else "%s  ·  %s" % [title, plat]
+
+
 func _cabinet_filtered() -> Array:
 	var needle := ""
 	if _cabinet_filter:
@@ -1921,6 +2193,8 @@ func _cabinet_filtered() -> Array:
 			var blob := "%s %s %s" % [title, plat, str(meta.get("developer", ""))]
 			if blob.to_lower().find(needle) < 0:
 				continue
+		if _cabinet_cached and not Cartridge.has_play_cache(str(rec.get("table", ""))):
+			continue
 		out.append(rec)
 	out.sort_custom(func(a: Variant, b: Variant) -> bool:
 		return str((a as Dictionary).get("title", "")).nocasecmp_to(str((b as Dictionary).get("title", ""))) < 0
@@ -1944,20 +2218,28 @@ func _paint_cabinet() -> void:
 	while i < stop:
 		var rec: Dictionary = rows[i]
 		i += 1
-		var meta: Dictionary = rec.get("meta", {})
-		var title := str(rec.get("title", rec.get("table", "?")))
-		var plat := Flashpoint.platform_label(meta)
-		var line := title if plat == "Unknown" else "%s  ·  %s" % [title, plat]
-		var idx := _inscribed_list.add_item(line, placeholder)
+		var idx := _inscribed_list.add_item(_cabinet_label(rec), placeholder)
 		_inscribed_list.set_item_metadata(idx, rec)
-		_inscribed_list.set_item_custom_fg_color(idx, TempleTheme.CYAN)
+		var cached := Cartridge.has_play_cache(str(rec.get("table", "")))
+		_inscribed_list.set_item_custom_fg_color(idx, TempleTheme.GREEN if cached else TempleTheme.CYAN)
+		_inscribed_list.set_item_tooltip(
+			idx,
+			"Local Play cache. Right-click to drop it."
+			if cached
+			else "Not cached locally. Play fetches from the chain."
+		)
 	var head := "ON CHAIN  ·  %d" % total
 	if not _cabinet_plat.is_empty():
 		head += "  ·  %s" % _cabinet_plat
+	if _cabinet_cached:
+		head += "  ·  CACHED"
 	if total > CABINET_PAGE:
 		head += "  ·  %d–%d" % [start + 1, stop]
 	_inscribed_header.text = head
-	_inscribed_empty.visible = total == 0
+	if _inscribed_empty:
+		_inscribed_empty.visible = total == 0
+		if total == 0 and _cabinet_cached:
+			_inscribed_empty.text = "No local Play cache."
 	if _cabinet_page_row:
 		_cabinet_page_row.visible = total > CABINET_PAGE
 		if _cabinet_page_label:
@@ -1997,10 +2279,7 @@ func _fill_cabinet_letters() -> void:
 	for n in range(26):
 		keys.append(String.chr(65 + n))
 	for letter in keys:
-		var b := Button.new()
-		b.text = letter
-		b.custom_minimum_size = Vector2(22, 20)
-		b.add_theme_font_size_override("font_size", 12)
+		var b := TempleTheme.index_button(letter, TempleTheme.CYAN)
 		b.pressed.connect(_on_cabinet_letter.bind(letter))
 		_cabinet_letters.add_child(b)
 		_cabinet_letter_buttons[letter] = b
@@ -2024,7 +2303,9 @@ func _paint_cabinet_letters() -> void:
 			b.add_theme_stylebox_override("normal", TempleTheme._solid(TempleTheme.CYAN))
 			b.add_theme_color_override("font_color", TempleTheme.BLACK)
 		else:
-			b.remove_theme_stylebox_override("normal")
+			b.add_theme_stylebox_override(
+				"normal", TempleTheme._box(Color(0, 0, 0, 0), Color(0, 0, 0, 0), 1, 0, 0)
+			)
 			b.add_theme_color_override("font_color", TempleTheme.CYAN)
 
 
@@ -2032,6 +2313,47 @@ func _on_cabinet_platform() -> void:
 	_cabinet_plat = _facet_value(_cabinet_platform)
 	_cabinet_page = 0
 	_paint_cabinet()
+
+
+func _on_cabinet_cached() -> void:
+	_cabinet_cached = not _cabinet_cached
+	if _cabinet_cached_btn:
+		_cabinet_cached_btn.text = "CACHED" if _cabinet_cached else "CACHE"
+		if _cabinet_cached:
+			_cabinet_cached_btn.add_theme_color_override("font_color", TempleTheme.GREEN)
+		else:
+			_cabinet_cached_btn.remove_theme_color_override("font_color")
+	_cabinet_page = 0
+	_paint_cabinet()
+
+
+func _on_inscribed_clicked(index: int, at_position: Vector2, mouse_button: int) -> void:
+	if mouse_button != MOUSE_BUTTON_RIGHT:
+		return
+	if index < 0 or _inscribed_list == null:
+		return
+	_inscribed_list.select(index)
+	_on_inscribed_selected(index)
+	var rec: Variant = _inscribed_list.get_item_metadata(index)
+	if not rec is Dictionary:
+		return
+	var table := str((rec as Dictionary).get("table", ""))
+	var cached := Cartridge.has_play_cache(table)
+	var menu := PopupMenu.new()
+	menu.add_item("PLAY", 0)
+	menu.add_item("DROP CACHE", 1)
+	menu.set_item_disabled(1, not cached)
+	menu.id_pressed.connect(func(id: int) -> void:
+		if id == 0:
+			_on_play()
+		elif id == 1:
+			_on_drop_cache()
+		menu.queue_free()
+	)
+	menu.close_requested.connect(menu.queue_free)
+	add_child(menu)
+	menu.position = Vector2i(_inscribed_list.get_screen_position() + at_position)
+	menu.popup()
 
 
 func _on_cabinet_prev() -> void:
@@ -2129,30 +2451,81 @@ func _set_job(text: String) -> void:
 		_progress.value = 0
 
 
-func _confirm(body: String) -> bool:
-	var dialog := ConfirmationDialog.new()
-	dialog.title = "No unpublish"
-	dialog.dialog_text = body
-	dialog.ok_button_text = "PROCEED"
-	dialog.cancel_button_text = "CANCEL"
-	add_child(dialog)
-	dialog.popup_centered()
+func _cache_cost_line(table: String) -> String:
+	if table.is_empty() or not Cartridge.has_play_cache(table):
+		return "No local Play cache. Play fetches the zip from the chain."
+	var n := Cartridge.tree_bytes(Cartridge.cache_dir(table))
+	return "Local Play cache %s. Drop it to free disk; Play will fetch again." % Flashpoint.format_bytes(n)
+
+
+func _confirm(body: String, heading: String = "NO UNPUBLISH") -> bool:
+	var veil := ColorRect.new()
+	veil.color = Color(0, 0, 0, 0.84)
+	veil.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
+	veil.mouse_filter = Control.MOUSE_FILTER_STOP
+	veil.z_index = 80
+	add_child(veil)
+
+	var centre := CenterContainer.new()
+	centre.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
+	centre.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	veil.add_child(centre)
+
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(540, 0)
+	panel.add_theme_stylebox_override("panel", TempleTheme.dialog_box())
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	centre.add_child(panel)
+
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 12)
+	panel.add_child(box)
+	box.add_child(TempleTheme.title(heading, TempleTheme.AMBER))
+	var body_label := TempleTheme.line(body, TempleTheme.GREY, TempleTheme.SIZE_BODY)
+	body_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	body_label.custom_minimum_size = Vector2(500, 0)
+	box.add_child(body_label)
+	box.add_child(TempleTheme.rule(TempleTheme.AMBER))
+
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	row.alignment = BoxContainer.ALIGNMENT_END
+	box.add_child(row)
+
 	var state := {"done": false, "ok": false}
-	dialog.confirmed.connect(func() -> void:
-		state.ok = true
+	var finish := func(ok: bool) -> void:
+		if bool(state.done):
+			return
+		state.ok = ok
 		state.done = true
+	var cancel := TempleTheme.button("CANCEL", finish.bind(false))
+	var escape := Shortcut.new()
+	var escape_key := InputEventKey.new()
+	escape_key.keycode = KEY_ESCAPE
+	escape.events.append(escape_key)
+	cancel.shortcut = escape
+	row.add_child(cancel)
+	var proceed := TempleTheme.primary_button("PROCEED", finish.bind(true))
+	row.add_child(proceed)
+
+	veil.gui_input.connect(func(event: InputEvent) -> void:
+		if event is InputEventMouseButton and (event as InputEventMouseButton).pressed:
+			finish.call(false)
 	)
-	dialog.canceled.connect(func() -> void:
-		state.done = true
-	)
-	dialog.visibility_changed.connect(func() -> void:
-		if not dialog.visible and not bool(state.done):
-			state.done = true
-	)
+
+	proceed.grab_focus()
 	while not state.done:
 		await get_tree().process_frame
-	dialog.queue_free()
+	veil.queue_free()
 	return bool(state.ok)
+
+
+func _toggle_log() -> void:
+	_log_open = not _log_open
+	if _console:
+		_console.visible = _log_open
+	if _log_btn:
+		_log_btn.text = "LOG  −" if _log_open else "LOG  +"
 
 
 func _set_busy(on: bool) -> void:

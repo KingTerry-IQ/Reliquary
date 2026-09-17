@@ -159,10 +159,7 @@ func inscribe(
 		last_error = "Entry has no id."
 		return null
 	if not await is_kindled():
-		last_error = (
-			"This chain has not been kindled. The operators must create the "
-			+ "dbRoot before anyone can inscribe."
-		)
+		last_error = "This chain has not been kindled."
 		return null
 
 	var table := Cartridge.table_name(uuid)

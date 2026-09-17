@@ -56,13 +56,16 @@ static func build() -> Theme:
 	_style_panels(theme)
 	_style_lists(theme)
 	_style_bars(theme)
+	_style_scroll(theme)
+	_style_tips(theme)
+	_style_windows(theme)
 
 	return theme
 
 
 static func _style_labels(theme: Theme) -> void:
 	# Default text is the light grey, not the dark one. Dark grey is reserved
-	# for genuinely decorative things like dead wood in the bush.
+	# for genuinely decorative things — rules, gutters, dead chrome.
 	theme.set_color("font_color", "Label", GREY)
 	theme.set_color("default_color", "RichTextLabel", GREY)
 	# The console is the only place long text lands, so give it room to breathe.
@@ -179,30 +182,140 @@ static func _style_bars(theme: Theme) -> void:
 	theme.set_color("font_outline_color", "ProgressBar", BLACK)
 
 
+static func _style_scroll(theme: Theme) -> void:
+	var track := _box(DARK_GREY, BLACK, 1, 1, 1)
+	var grab := _box(YELLOW, YELLOW, 0, 0, 1)
+	var grab_hot := _box(WHITE, WHITE, 0, 0, 1)
+	for kind in ["VScrollBar", "HScrollBar"]:
+		theme.set_stylebox("scroll", kind, track)
+		theme.set_stylebox("scroll_focus", kind, track)
+		theme.set_stylebox("grabber", kind, grab)
+		theme.set_stylebox("grabber_highlight", kind, grab_hot)
+		theme.set_stylebox("grabber_pressed", kind, grab_hot)
+		theme.set_stylebox("grabber_area", kind, StyleBoxEmpty.new())
+		theme.set_stylebox("grabber_area_highlight", kind, StyleBoxEmpty.new())
+
+
+static func _style_tips(theme: Theme) -> void:
+	theme.set_stylebox("panel", "TooltipPanel", _outline(YELLOW, BLACK))
+	theme.set_color("font_color", "TooltipLabel", GREY)
+	theme.set_font_size("font_size", "TooltipLabel", SIZE_SMALL)
+
+
+static func _style_windows(theme: Theme) -> void:
+	theme.set_stylebox("embedded_border", "Window", _outline(YELLOW, PANEL))
+	theme.set_stylebox("embedded_unfocused_border", "Window", _outline(DARK_GREY, PANEL))
+	theme.set_color("title_color", "Window", YELLOW)
+	theme.set_constant("title_height", "Window", 28)
+	theme.set_stylebox("panel", "AcceptDialog", _outline(AMBER, BLACK))
+
+
 static func _outline(border: Color, fill: Color) -> StyleBoxFlat:
+	return _box(border, fill, 8, 4, 1)
+
+
+static func _solid(fill: Color) -> StyleBoxFlat:
+	return _box(fill, fill, 8, 4, 1)
+
+
+static func _box(border: Color, fill: Color, pad_x: int, pad_y: int, width: int) -> StyleBoxFlat:
 	var box := StyleBoxFlat.new()
 	box.bg_color = fill
 	box.draw_center = fill.a > 0.0
 	box.border_color = border
-	box.set_border_width_all(1)
+	box.set_border_width_all(width)
 	# No corner radius anywhere. Text mode did not round its corners.
-	box.content_margin_left = 8
-	box.content_margin_right = 8
-	box.content_margin_top = 4
-	box.content_margin_bottom = 4
+	box.content_margin_left = pad_x
+	box.content_margin_right = pad_x
+	box.content_margin_top = pad_y
+	box.content_margin_bottom = pad_y
 	return box
 
 
-static func _solid(fill: Color) -> StyleBoxFlat:
-	var box := StyleBoxFlat.new()
-	box.bg_color = fill
-	box.border_color = fill
-	box.set_border_width_all(1)
-	box.content_margin_left = 8
-	box.content_margin_right = 8
-	box.content_margin_top = 4
-	box.content_margin_bottom = 4
-	return box
+static func chip_box(colour: Color) -> StyleBoxFlat:
+	return _box(colour, BLACK, 10, 3, 1)
+
+
+static func screen_box() -> StyleBoxFlat:
+	return _box(YELLOW, BLACK, 3, 3, 2)
+
+
+static func dialog_box() -> StyleBoxFlat:
+	return _box(AMBER, BLACK, 18, 14, 1)
+
+
+## Recolour a chip built by wrap_chip when a status changes.
+static func paint_chip(label: Label, text: String, colour: Color) -> void:
+	if label == null:
+		return
+	label.text = text
+	label.add_theme_color_override("font_color", colour)
+	var parent := label.get_parent()
+	if parent is PanelContainer:
+		(parent as PanelContainer).add_theme_stylebox_override("panel", chip_box(colour))
+
+
+static func wrap_chip(label: Label, colour: Color) -> PanelContainer:
+	var wrap := PanelContainer.new()
+	wrap.add_theme_stylebox_override("panel", chip_box(colour))
+	wrap.size_flags_horizontal = Control.SIZE_SHRINK_END
+	wrap.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	wrap.add_child(label)
+	return wrap
+
+
+## Jukebox index key: one letter, fills the strip, no fat button padding.
+static func index_button(letter: String, accent: Color) -> Button:
+	var b := Button.new()
+	b.text = letter
+	b.focus_mode = Control.FOCUS_NONE
+	b.custom_minimum_size = Vector2(24, 14)
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	b.add_theme_font_size_override("font_size", 12)
+	b.add_theme_color_override("font_color", accent)
+	b.add_theme_color_override("font_hover_color", BLACK)
+	b.add_theme_color_override("font_pressed_color", BLACK)
+	b.add_theme_color_override("font_focus_color", accent)
+	var quiet := _box(Color(0, 0, 0, 0), Color(0, 0, 0, 0), 1, 0, 0)
+	b.add_theme_stylebox_override("normal", quiet)
+	b.add_theme_stylebox_override("hover", _solid(accent))
+	b.add_theme_stylebox_override("pressed", _solid(WHITE))
+	b.add_theme_stylebox_override("focus", quiet)
+	return b
+
+
+static func tag_button(text: String, on_pressed: Callable) -> Button:
+	var b := button(text, on_pressed)
+	b.add_theme_font_size_override("font_size", SIZE_SMALL)
+	b.add_theme_stylebox_override("normal", _box(DARK_GREY, BLACK, 6, 2, 1))
+	b.add_theme_stylebox_override("hover", _box(CYAN, BLACK, 6, 2, 1))
+	b.add_theme_stylebox_override("pressed", _solid(CYAN))
+	b.add_theme_color_override("font_color", CYAN)
+	b.add_theme_color_override("font_hover_color", CYAN)
+	b.add_theme_color_override("font_pressed_color", BLACK)
+	return b
+
+
+static func rule(colour: Color = DARK_GREY, vertical: bool = false) -> ColorRect:
+	var line := ColorRect.new()
+	line.color = colour
+	line.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	if vertical:
+		line.custom_minimum_size = Vector2(1, 0)
+		line.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	else:
+		line.custom_minimum_size = Vector2(0, 1)
+		line.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	return line
+
+
+## Tiled 1-bit scanlines. Honest pixels, no shader.
+static func scan_texture() -> Texture2D:
+	var img := Image.create(1, 2, false, Image.FORMAT_RGBA8)
+	img.set_pixel(0, 0, Color(0, 0, 0, 0))
+	img.set_pixel(0, 1, Color(0, 0, 0, 0.32))
+	return ImageTexture.create_from_image(img)
 
 
 ## A heading, in the app's voice: bright, spaced, shouted.
@@ -245,12 +358,38 @@ static func cell(text: String, colour: Color = GREY, size: int = SIZE_SMALL) -> 
 
 ## The one action the app is recommending: filled rather than outlined, so
 ## there is never a question of where to look first.
+##
+## Theme font_focus_color is yellow, which is right on an outlined idle
+## button and invisible on this yellow fill. Confirm dialogs grab_focus the
+## proceed button, so every focus/pressed colour has to stay black.
 static func primary_button(text: String, on_pressed: Callable) -> Button:
 	var b := button(text, on_pressed)
 	b.add_theme_stylebox_override("normal", _solid(YELLOW))
 	b.add_theme_stylebox_override("hover", _solid(WHITE))
+	b.add_theme_stylebox_override("pressed", _solid(WHITE))
+	b.add_theme_stylebox_override("hover_pressed", _solid(WHITE))
+	b.add_theme_stylebox_override("focus", _box(WHITE, YELLOW, 8, 4, 1))
 	b.add_theme_color_override("font_color", BLACK)
 	b.add_theme_color_override("font_hover_color", BLACK)
+	b.add_theme_color_override("font_pressed_color", BLACK)
+	b.add_theme_color_override("font_hover_pressed_color", BLACK)
+	b.add_theme_color_override("font_focus_color", BLACK)
+	return b
+
+
+## Maintenance, not a destination: small muted outline, skipped in tab order.
+static func quiet_button(text: String, on_pressed: Callable) -> Button:
+	var b := button(text, on_pressed)
+	b.focus_mode = Control.FOCUS_NONE
+	b.add_theme_font_size_override("font_size", SIZE_SMALL)
+	b.add_theme_stylebox_override("normal", _box(DARK_GREY, BLACK, 6, 2, 1))
+	b.add_theme_stylebox_override("hover", _box(MUTED, BLACK, 6, 2, 1))
+	b.add_theme_stylebox_override("pressed", _solid(MUTED))
+	b.add_theme_stylebox_override("disabled", _box(DARK_GREY, BLACK, 6, 2, 1))
+	b.add_theme_color_override("font_color", MUTED)
+	b.add_theme_color_override("font_hover_color", WHITE)
+	b.add_theme_color_override("font_pressed_color", BLACK)
+	b.add_theme_color_override("font_disabled_color", DARK_GREY)
 	return b
 
 
@@ -269,6 +408,15 @@ static func header(text: String) -> Label:
 
 static func panel() -> PanelContainer:
 	var p := PanelContainer.new()
+	p.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	p.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	p.clip_contents = true
+	return p
+
+
+static func screen() -> PanelContainer:
+	var p := PanelContainer.new()
+	p.add_theme_stylebox_override("panel", screen_box())
 	p.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	p.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	p.clip_contents = true

@@ -8,8 +8,92 @@ const BIN_ROOT := "user://bin/shockwave"
 const VERSION_PATH := "user://bin/shockwave/VERSION"
 const COMPONENTS_XML := "https://nexus-dev.unstable.life/repository/stable/components.xml"
 const ZIP_URL := "https://nexus-dev.unstable.life/repository/stable/supportpack-shockwave.zip"
-const UA := "FlashCartridge/0.1 (GodOnChain; SPR fetch)"
+const UA := "Reliquary/0.1 (GodOnChain; SPR fetch)"
 const DEFAULT_PJ := "PJ101"
+## Windows create_process starts Director/SPR hidden; shell-launch and raise.
+const LAUNCH_PS1 := r"""
+param(
+  [Parameter(Mandatory = $true)][string]$Exe,
+  [Parameter(Mandatory = $true)][string]$Cwd,
+  [Parameter(Mandatory = $true)][string]$PidFile,
+  [string]$ArgFile = '',
+  [int]$RaiseMs = 8000
+)
+$ErrorActionPreference = 'Stop'
+try {
+  Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class SprWin {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int pid);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr h, int n);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  static int _pid;
+  static bool Cb(IntPtr h, IntPtr l) {
+    uint wpid;
+    GetWindowThreadProcessId(h, out wpid);
+    if (wpid != (uint)_pid) return true;
+    if ((GetWindowLongPtr(h, -20).ToInt64() & 0x80L) != 0) return true;
+    if (!IsWindowVisible(h) && !IsIconic(h)) return true;
+    if (IsIconic(h)) ShowWindowAsync(h, 9);
+    else ShowWindowAsync(h, 5);
+    uint fgPid;
+    uint fgTid = GetWindowThreadProcessId(GetForegroundWindow(), out fgPid);
+    uint thisTid = GetCurrentThreadId();
+    bool attached = false;
+    if (fgTid != thisTid) attached = AttachThreadInput(fgTid, thisTid, true);
+    BringWindowToTop(h);
+    SetForegroundWindow(h);
+    if (attached) AttachThreadInput(fgTid, thisTid, false);
+    return true;
+  }
+  public static void Raise(int pid) {
+    _pid = pid;
+    AllowSetForegroundWindow(-1);
+    EnumWindows(new EnumProc(Cb), IntPtr.Zero);
+  }
+}
+'@
+} catch {}
+$SprArgs = @()
+if ($ArgFile -and (Test-Path -LiteralPath $ArgFile)) {
+  $parsed = Get-Content -LiteralPath $ArgFile -Raw | ConvertFrom-Json
+  $SprArgs = @($parsed)
+}
+try { [SprWin]::AllowSetForegroundWindow(-1) } catch {}
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = $Exe
+$psi.WorkingDirectory = $Cwd
+$psi.UseShellExecute = $true
+$psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+if ($SprArgs.Count -gt 0) {
+  $quoted = foreach ($a in $SprArgs) {
+    if ($null -eq $a) { continue }
+    $s = [string]$a
+    if ($s -match '[\s"]') { '"' + $s.Replace('"','\"') + '"' } else { $s }
+  }
+  $psi.Arguments = [string]::Join(' ', @($quoted))
+}
+$p = [System.Diagnostics.Process]::Start($psi)
+if (-not $p) { exit 1 }
+Set-Content -LiteralPath $PidFile -Value $p.Id -Encoding ASCII
+$deadline = [datetime]::UtcNow.AddMilliseconds($RaiseMs)
+do {
+  try { [SprWin]::Raise([int]$p.Id) } catch {}
+  Start-Sleep -Milliseconds 250
+  $p.Refresh()
+} while (-not $p.HasExited -and [datetime]::UtcNow -lt $deadline)
+"""
 
 var last_error: String = ""
 var tag: String = ""
@@ -118,10 +202,73 @@ func play(movie: String, extra: PackedStringArray = PackedStringArray(), pj: Str
 		return -1
 	var args := PackedStringArray([movie])
 	args.append_array(extra)
-	_pid = OS.create_process(exe, args, false)
+	if OS.get_name() == "Windows":
+		_pid = _launch_shown(exe, args)
+	else:
+		_pid = OS.create_process(exe, args, false)
 	if _pid == -1:
 		last_error = "Failed to launch SPR.exe."
 	return _pid
+
+
+func _launch_shown(exe: String, args: PackedStringArray) -> int:
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://bin"))
+	var script_res := "user://bin/spr_launch.ps1"
+	var args_res := "user://bin/spr-args.json"
+	var pid_res := "user://bin/spr-launch.pid"
+	if not _write_text(script_res, LAUNCH_PS1.strip_edges() + "\n"):
+		return OS.create_process(exe, args, false)
+	var payload: Array = []
+	for a in args:
+		payload.append(a)
+	if not _write_text(args_res, JSON.stringify(payload)):
+		return OS.create_process(exe, args, false)
+	if FileAccess.file_exists(pid_res):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(pid_res))
+	var script_abs := ProjectSettings.globalize_path(script_res).replace("/", "\\")
+	var exe_abs := exe.replace("/", "\\")
+	var cwd := exe.get_base_dir().replace("/", "\\")
+	var pid_abs := ProjectSettings.globalize_path(pid_res).replace("/", "\\")
+	var args_abs := ProjectSettings.globalize_path(args_res).replace("/", "\\")
+	var helper := OS.create_process("powershell.exe", PackedStringArray([
+		"-NoProfile",
+		"-STA",
+		"-ExecutionPolicy",
+		"Bypass",
+		"-File",
+		script_abs,
+		"-Exe",
+		exe_abs,
+		"-Cwd",
+		cwd,
+		"-PidFile",
+		pid_abs,
+		"-ArgFile",
+		args_abs,
+		"-RaiseMs",
+		"8000",
+	]), false)
+	if helper == -1:
+		return OS.create_process(exe, args, false)
+	for _i in 40:
+		OS.delay_msec(50)
+		var pid := _read_pid_file(pid_res)
+		if pid > 0:
+			return pid
+	return OS.create_process(exe, args, false)
+
+
+func _read_pid_file(path: String) -> int:
+	if not FileAccess.file_exists(path):
+		return -1
+	var file := FileAccess.open(path, FileAccess.READ)
+	if file == null:
+		return -1
+	var text := file.get_as_text().strip_edges()
+	file.close()
+	if text.is_valid_int():
+		return int(text)
+	return -1
 
 
 func _write_text(path: String, text: String) -> bool:

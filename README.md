@@ -1,4 +1,4 @@
-# Flash Cartridge
+# Reliquary
 
 **Search the archive. Inscribe a title. Play what the chain already holds.**
 
@@ -10,7 +10,9 @@ Each inscribed Flash GameZIP is **its own IQDB table** under
 GodOnChain-KingTerry-FlashCartridge
 ```
 
-`createTable` pays the root creator — the operators — not the person who clicked Inscribe. The dbRoot is already kindled on MON, SOL, and RH. Inscribe is refused if that sentinel is missing, so a later user cannot become the root creator.
+That path was kindled before the name Reliquary. It does not move.
+
+The dbRoot is already kindled on MON, SOL, and RH. Inscribe is refused if that sentinel is missing.
 
 ## Using it
 

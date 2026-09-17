@@ -7,7 +7,7 @@ extends Node
 const VERSION_PATH := "user://bin/ruffle/VERSION"
 const BIN_ROOT := "user://bin/ruffle"
 const GITHUB_LATEST := "https://api.github.com/repos/ruffle-rs/ruffle/releases/latest"
-const UA := "FlashCartridge/0.1 (GodOnChain; Ruffle fetch)"
+const UA := "Reliquary/0.1 (GodOnChain; Ruffle fetch)"
 
 var last_error: String = ""
 var tag: String = ""

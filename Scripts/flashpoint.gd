@@ -4,7 +4,7 @@ class_name Flashpoint
 extends Node
 
 const API := "https://db-api.unstable.life"
-const UA := "FlashCartridge/0.1 (GodOnChain; archival client)"
+const UA := "Reliquary/0.1 (GodOnChain; archival client)"
 ## Same tree Infinity pulls missing Legacy/htdocs files from.
 const LEGACY_HTDOCS := "https://infinity.unstable.life/Flashpoint/Legacy/htdocs/"
 const PLAYLIST_ZIP := "https://nexus-dev.unstable.life/repository/stable/%s.zip"

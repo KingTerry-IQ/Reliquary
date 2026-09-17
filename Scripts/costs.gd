@@ -84,6 +84,6 @@ static func format(chain: String, amount: float) -> String:
 
 static func quote_inscribe(chain: String, raw_zip_bytes: int) -> String:
 	return (
-		"About %s to inscribe (%s createTable to the root, the rest for the rows)."
-		% [format(chain, inscribe(chain, raw_zip_bytes)), format(chain, create_table(chain))]
+		"About %s to inscribe."
+		% format(chain, inscribe(chain, raw_zip_bytes))
 	)

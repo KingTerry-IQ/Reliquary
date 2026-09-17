@@ -164,7 +164,7 @@ func _fetch_remote(rel: String) -> PackedByteArray:
 	var req_path := "/" + url.get_slice("://", 1).get_slice("/", 1)
 	if url.find("/", url.find("://") + 3) >= 0:
 		req_path = url.substr(url.find("/", url.find("://") + 3))
-	if http.request(HTTPClient.METHOD_GET, req_path, PackedStringArray(["User-Agent: FlashCartridge/0.1"])) != OK:
+	if http.request(HTTPClient.METHOD_GET, req_path, PackedStringArray(["User-Agent: Reliquary/0.1"])) != OK:
 		return PackedByteArray()
 	while http.get_status() == HTTPClient.STATUS_REQUESTING:
 		if Time.get_ticks_msec() - start > 15000:
