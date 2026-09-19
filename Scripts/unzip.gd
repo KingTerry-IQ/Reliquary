@@ -100,6 +100,48 @@ static func extra_args(launch: String) -> PackedStringArray:
 	return _split_tokens(s.substr(end))
 
 
+## OldCPUSimulator `-t N` (MHz) from a Flashpoint launch command.
+static func cpu_mhz(launch: String) -> int:
+	var t := tokens(launch)
+	var i := 0
+	while i < t.size():
+		var a := t[i]
+		if a == "-t" or a == "--target-rate":
+			if i + 1 < t.size() and str(t[i + 1]).is_valid_int():
+				return maxi(0, int(t[i + 1]))
+		i += 1
+	return 0
+
+
+## Curation `-t` wins. Authentic mode otherwise picks an era clock from releaseDate.
+static func era_mhz(entry: Dictionary, launch: String = "", authentic: bool = true) -> int:
+	var cmd := launch.strip_edges()
+	if cmd.is_empty():
+		cmd = str(entry.get("launch", entry.get("launchCommand", "")))
+	var n := cpu_mhz(cmd)
+	if n > 0:
+		return n
+	if not authentic:
+		return 0
+	var date := str(entry.get("releaseDate", "")).strip_edges()
+	var year := 0
+	if date.length() >= 4 and date.substr(0, 4).is_valid_int():
+		year = int(date.substr(0, 4))
+	if year <= 0:
+		return 800
+	if year < 1998:
+		return 200
+	if year < 2001:
+		return 366
+	if year < 2004:
+		return 800
+	if year < 2007:
+		return 1600
+	if year < 2010:
+		return 2200
+	return 2800
+
+
 static func _first_url(s: String) -> String:
 	if s.is_empty():
 		return ""

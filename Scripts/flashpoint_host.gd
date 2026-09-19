@@ -104,32 +104,48 @@ static func needs_shockwave(entry: Dictionary) -> bool:
 	return false
 
 
-## Platforms that still need a full Flashpoint install (CLIFp). Shockwave uses
-## auto-fetched SPR.exe instead. Unity Web Player is still plugin HTML.
+## Plugin / Navigator host. Flash SWF+HTML and HTML5 play locally; Shockwave
+## uses SPR. Everything else (Unity, Vitalize, SVG plugin, start*.bat, a
+## SecurePlayer template prefix before the URL, unnamed NPAPI platforms…)
+## goes through the fetched support pack, not Chrome or a file association.
 static func needs_flashpoint(entry: Dictionary) -> bool:
 	if needs_shockwave(entry):
 		return false
-	var launch := str(entry.get("launch", entry.get("launchCommand", ""))).to_lower()
+	var launch := str(entry.get("launch", entry.get("launchCommand", "")))
 	var plat := str(entry.get("platform", "")).to_lower()
-	var app := str(entry.get("applicationPath", "")).to_lower()
-	if plat.find("unity") >= 0 or app.find("startunity") >= 0:
+	var app := str(entry.get("applicationPath", "")).replace("\\", "/").to_lower()
+	if app.find("flashplayer") >= 0:
+		return false
+	if app.ends_with("spr.exe") or app.find("/spr.exe") >= 0:
+		return false
+	if app.find("secureplayer") >= 0:
 		return true
-	if plat.find("java") >= 0 or app.find("startjava") >= 0:
+	if app.find(".bat") >= 0 and app.get_file().begins_with("start"):
 		return true
-	if plat.find("silverlight") >= 0:
+	if app.find("netscape") >= 0 or app.find("basilisk") >= 0:
 		return true
-	if plat.find("authorware") >= 0:
+	var movie := Unzip.movie_url(launch)
+	if not movie.is_empty():
+		var idx := launch.find(movie)
+		if idx > 0:
+			var prefix := launch.substr(0, idx).strip_edges().trim_prefix("\"").strip_edges()
+			if not prefix.is_empty() and not prefix.to_lower().begins_with("http"):
+				return true
+	if _plays_in_ruffle_or_html(plat):
+		return false
+	return not plat.strip_edges().is_empty()
+
+
+## Flash and HTML5 we host ourselves. "HTML+TIME" is a plugin, not HTML5.
+static func _plays_in_ruffle_or_html(plat: String) -> bool:
+	var p := plat.strip_edges()
+	if p.is_empty():
+		return false
+	var primary := p.split(";")[0].strip_edges()
+	if primary == "flash" or primary.begins_with("flash "):
 		return true
-	if plat.find("3dvia") >= 0 or plat.find("popcap") >= 0:
+	if primary == "html5" or primary == "html 5":
 		return true
-	if plat.find("shiva") >= 0 or plat.find("pulse") >= 0:
-		return true
-	if plat.find("activex") >= 0 or app.find("startactivex") >= 0:
-		return true
-	if plat.find("viscape") >= 0 or plat.find("vrml") >= 0:
-		return true
-	if app.find("secureplayer") >= 0 or app.find("startcosmo") >= 0:
-		return true
-	if launch.begins_with("shiva3d") or launch.begins_with("pulse ") or launch.begins_with("svr "):
+	if p.find("flash") >= 0 and p.find("html5") >= 0:
 		return true
 	return false

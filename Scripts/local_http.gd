@@ -267,9 +267,7 @@ func _serve_peer(peer: StreamPeerTCP) -> void:
 	if full.is_empty():
 		var as_dir := _root.path_join(path) if not path.is_empty() else _root
 		if path.is_empty() or DirAccess.dir_exists_absolute(as_dir):
-			full = as_dir.path_join("index.html") if not path.is_empty() else _root.path_join("index.html")
-			if not FileAccess.file_exists(full):
-				full = ""
+			full = index_file(as_dir if not path.is_empty() else _root)
 	if (
 		full.is_empty()
 		and not _remote.is_empty()
@@ -287,6 +285,10 @@ func _serve_peer(peer: StreamPeerTCP) -> void:
 			if FileAccess.file_exists(dest):
 				full = dest
 	if full.is_empty() or not FileAccess.file_exists(full):
+		var policy := policy_body(path)
+		if not policy.is_empty():
+			_reply(peer, 200, "text/xml", policy.to_utf8_buffer(), method == "HEAD", text)
+			return
 		_reply(peer, 404, "text/plain", "not found".to_utf8_buffer(), method == "HEAD", text)
 		return
 	_last_ok_dir = full.get_base_dir()
@@ -409,6 +411,61 @@ static func director_alt_rel(path: String) -> String:
 			return ""
 
 
+## Other published/unpublished pairs old runtimes request.
+static func alt_rels(path: String) -> PackedStringArray:
+	var out := PackedStringArray()
+	var d := director_alt_rel(path)
+	if not d.is_empty():
+		out.append(d)
+	var ext := path.get_extension().to_lower()
+	var stem := path.get_basename()
+	match ext:
+		"htm":
+			out.append(stem + ".html")
+		"html":
+			out.append(stem + ".htm")
+		"jpg":
+			out.append(stem + ".jpeg")
+		"jpeg":
+			out.append(stem + ".jpg")
+	return out
+
+
+static func index_file(dir: String) -> String:
+	if dir.is_empty() or not DirAccess.dir_exists_absolute(dir):
+		return ""
+	for n in ["index.html", "index.htm", "default.html", "default.htm"]:
+		var p := dir.path_join(n)
+		if FileAccess.file_exists(p):
+			return p
+	return ""
+
+
+static func www_fold_rel(path: String) -> String:
+	var rel := path.replace("\\", "/")
+	while rel.begins_with("/"):
+		rel = rel.substr(1)
+	var slash := rel.find("/")
+	var host := rel if slash < 0 else rel.substr(0, slash)
+	var rest := "" if slash < 0 else rel.substr(slash)
+	var h := host.to_lower()
+	if h.begins_with("www.") and h.length() > 4:
+		return host.substr(4) + rest
+	if h.find(".") >= 0 and not h.begins_with("www."):
+		return "www." + host + rest
+	return ""
+
+
+## Flash / Silverlight sandbox policy when the zip has no copy.
+static func policy_body(path: String) -> String:
+	var name := path.get_file().to_lower()
+	if name == "crossdomain.xml":
+		return "<?xml version=\"1.0\"?>\n<cross-domain-policy>\n<allow-access-from domain=\"*\"/>\n</cross-domain-policy>\n"
+	if name == "clientaccesspolicy.xml":
+		return "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<access-policy><cross-domain-access><policy><allow-from http-request-headers=\"*\"><domain uri=\"*\"/></allow-from><grant-to><resource path=\"/\" include-subpaths=\"true\"/></grant-to></policy></cross-domain-access></access-policy>\n"
+	return ""
+
+
 ## Absolute Windows/UNC path that leaked through as a request target.
 static func is_filesystem_rel(path: String) -> bool:
 	var p := path.replace("\\", "/").lstrip("/")
@@ -429,9 +486,17 @@ static func file_in_tree(root: String, path: String, hint_dir: String = "") -> S
 	var full := dest.path_join(rel) if not rel.is_empty() else dest
 	if FileAccess.file_exists(full):
 		return full
-	var alt := director_alt_rel(full)
-	if not alt.is_empty() and FileAccess.file_exists(alt):
-		return alt
+	for alt in alt_rels(full):
+		if FileAccess.file_exists(alt):
+			return alt
+	var folded := www_fold_rel(rel)
+	if not folded.is_empty():
+		var fold_full := dest.path_join(folded)
+		if FileAccess.file_exists(fold_full):
+			return fold_full
+		for alt in alt_rels(fold_full):
+			if FileAccess.file_exists(alt):
+				return alt
 	var fname := rel.get_file()
 	if fname.is_empty():
 		return ""
@@ -440,9 +505,9 @@ static func file_in_tree(root: String, path: String, hint_dir: String = "") -> S
 		var sib := hint.path_join(fname)
 		if FileAccess.file_exists(sib):
 			return sib
-		var salt := director_alt_rel(sib)
-		if not salt.is_empty() and FileAccess.file_exists(salt):
-			return salt
+		for salt in alt_rels(sib):
+			if FileAccess.file_exists(salt):
+				return salt
 	if is_filesystem_rel(rel):
 		var hit := _find_in(dest, fname)
 		if not hit.is_empty() and FileAccess.file_exists(hit):
@@ -570,17 +635,29 @@ static func _find_in(dir: String, filename: String) -> String:
 	return ""
 
 
+static func mime_for(path: String) -> String:
+	return _mime_of(path)
+
+
 func _mime(path: String) -> String:
+	return _mime_of(path)
+
+
+static func _mime_of(path: String) -> String:
 	var ext := path.get_extension().to_lower()
 	match ext:
 		"html", "htm":
-			return "text/html; charset=utf-8"
+			return "text/html"
 		"js":
-			return "application/javascript"
+			return "text/javascript"
 		"css":
 			return "text/css"
 		"json":
 			return "application/json"
+		"xml":
+			return "text/xml"
+		"txt":
+			return "text/plain"
 		"png":
 			return "image/png"
 		"jpg", "jpeg":
@@ -591,21 +668,57 @@ func _mime(path: String) -> String:
 			return "image/webp"
 		"svg":
 			return "image/svg+xml"
+		"bmp":
+			return "image/bmp"
+		"ico":
+			return "image/x-icon"
 		"mp3":
 			return "audio/mpeg"
 		"ogg":
 			return "audio/ogg"
 		"wav":
 			return "audio/wav"
+		"mid", "midi":
+			return "audio/midi"
 		"mp4":
 			return "video/mp4"
 		"wasm":
 			return "application/wasm"
-		"swf":
+		"swf", "spl", "swt":
 			return "application/x-shockwave-flash"
-		"dcr", "dir", "dxr", "cct", "cst", "cxt":
+		"dcr", "dir", "dxr", "cct", "cst", "cxt", "swa", "w3d", "fgd":
 			return "application/x-director"
-		"w3d", "fgd":
-			return "application/octet-stream"
+		"aam", "aas", "aab":
+			return "application/x-authorware-map"
+		"class":
+			return "application/java"
+		"jar":
+			return "application/java-archive"
+		"jnlp":
+			return "application/x-java-jnlp-file"
+		"xap":
+			return "application/x-silverlight-app"
+		"unity3d":
+			return "application/vnd.unity"
+		"cmo", "vmo", "nmo", "nms":
+			return "application/x-virtools"
+		"cnc":
+			return "application/x-cnc"
+		"pwc":
+			return "application/x-pulse-player"
+		"pwn":
+			return "application/x-pulse-download"
+		"pw3":
+			return "application/x-pulse-player-32"
+		"pws":
+			return "application/x-pulse-stream"
+		"wrl", "wrz":
+			return "model/vrml"
+		"vrt":
+			return "x-world/x-vrt"
+		"svr":
+			return "x-world/x-svr"
+		"xvr":
+			return "x-world/x-xvr"
 		_:
 			return "application/octet-stream"

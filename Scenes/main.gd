@@ -3,6 +3,7 @@ extends Control
 const CONFIG_PATH := "user://flash.cfg"
 const APP_NAME := "Reliquary"
 const INSCRIBE_GUIDE := "This game stays permanently accessible."
+const MISSING_RUNTIME := "MISSING RUNTIME"
 const PAGE_SIZE := 400
 const CABINET_PAGE := 80
 const GENRES: PackedStringArray = [
@@ -135,6 +136,11 @@ var _play_btn: Button
 var _drop_btn: Button
 var _search_btn: Button
 var _chain: OptionButton
+var _authentic: bool = true
+var _time_btn: Button
+var _player_veil: ColorRect
+var _player_wait_label: Label
+var _player_waiting: bool = false
 
 
 func _ready() -> void:
@@ -227,6 +233,18 @@ func _build_ui() -> void:
 	columns.add_child(_build_cabinet_column())
 
 	root.add_child(_build_footer())
+	_player_veil = ColorRect.new()
+	_player_veil.color = Color(0, 0, 0, 0.78)
+	_player_veil.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
+	_player_veil.visible = false
+	_player_veil.mouse_filter = Control.MOUSE_FILTER_STOP
+	_player_veil.z_index = 70
+	add_child(_player_veil)
+	_player_wait_label = TempleTheme.line("LOADING PLAYER…", TempleTheme.YELLOW, TempleTheme.SIZE_DISPLAY)
+	_player_wait_label.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
+	_player_wait_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_player_wait_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_player_veil.add_child(_player_wait_label)
 	_apply_archive_view()
 	_clear_detail()
 	_log("Search the archive. Inscribe a title. Play what the chain already holds.")
@@ -268,6 +286,13 @@ func _build_topbar() -> Control:
 	_spr_label.tooltip_text = "Shockwave projector, fetched on demand."
 	_nav_label = _status_chip(bar, "NAV  …", TempleTheme.AMBER)
 	_nav_label.tooltip_text = "HTML5 / plugin player (Flashpoint Navigator), fetched on demand."
+	_time_btn = Button.new()
+	_time_btn.focus_mode = Control.FOCUS_NONE
+	_time_btn.custom_minimum_size = Vector2(108, 0)
+	_time_btn.add_theme_font_size_override("font_size", TempleTheme.SIZE_SMALL)
+	_time_btn.pressed.connect(_toggle_authentic)
+	bar.add_child(_time_btn)
+	_paint_time_chip()
 
 	_chain = OptionButton.new()
 	_chain.add_item("MON", 0)
@@ -283,6 +308,46 @@ func _build_topbar() -> Control:
 	bar.add_child(_chain)
 	bar.add_child(TempleTheme.button("REFRESH", _on_refresh))
 	return bar
+
+
+func _paint_time_chip() -> void:
+	if _time_btn == null:
+		return
+	var colour := TempleTheme.GREEN if _authentic else TempleTheme.AMBER
+	_time_btn.text = "TIME  ERA" if _authentic else "TIME  NOW"
+	_time_btn.tooltip_text = (
+		"Throttle toward era hardware so titles don't race. Click for full modern speed."
+		if _authentic
+		else "Full modern speed. Click to throttle toward era hardware."
+	)
+	_time_btn.add_theme_color_override("font_color", colour)
+	_time_btn.add_theme_color_override("font_hover_color", TempleTheme.BLACK)
+	_time_btn.add_theme_color_override("font_pressed_color", TempleTheme.BLACK)
+	_time_btn.add_theme_stylebox_override("normal", TempleTheme.chip_box(colour))
+	_time_btn.add_theme_stylebox_override("hover", TempleTheme.chip_box(TempleTheme.WHITE))
+	_time_btn.add_theme_stylebox_override("pressed", TempleTheme.chip_box(TempleTheme.YELLOW))
+
+
+func _toggle_authentic() -> void:
+	_authentic = not _authentic
+	_paint_time_chip()
+	_save_config()
+	_log("Time %s." % ("era" if _authentic else "modern"))
+
+
+func _throttle_mhz(meta: Dictionary) -> int:
+	return Unzip.era_mhz(
+		meta, str(meta.get("launch", meta.get("launchCommand", ""))), _authentic
+	)
+
+
+func _prepare_throttle(meta: Dictionary) -> String:
+	if _throttle_mhz(meta) <= 0:
+		return ""
+	if packs.oldcpu_exe().is_empty():
+		_set_job("Fetching era-speed helper…")
+		await packs.ensure_oldcpu(_on_progress, _recover_download)
+	return packs.oldcpu_exe()
 
 
 func _status_chip(bar: Control, text: String, colour: Color) -> Label:
@@ -969,7 +1034,7 @@ func _on_host_missing(reason: String) -> void:
 func _ensure_ruffle() -> void:
 	TempleTheme.paint_chip(_ruffle_label, "RUFFLE  …", TempleTheme.AMBER)
 	_set_job("Fetching Ruffle…")
-	var ok := await ruffle.ensure()
+	var ok := await ruffle.ensure(_recover_download)
 	if ok:
 		TempleTheme.paint_chip(_ruffle_label, "RUFFLE  %s" % ruffle.tag, TempleTheme.GREEN)
 		_set_job("Ready.")
@@ -1966,7 +2031,7 @@ func _trial_play(entry: Dictionary) -> void:
 	_set_busy(true)
 	_last_progress = -1
 	if ruffle.exe_path.is_empty() and not FlashpointHost.needs_shockwave(entry):
-		await ruffle.ensure()
+		await ruffle.ensure(_recover_download)
 	var dest := Cartridge.trial_dir(uuid)
 	var dest_abs := ProjectSettings.globalize_path(dest)
 	var launch := str(entry.get("launchCommand", ""))
@@ -2007,7 +2072,7 @@ func _play_inscribed() -> void:
 	_set_busy(true)
 	_last_progress = -1
 	if ruffle.exe_path.is_empty() and not FlashpointHost.needs_shockwave(meta):
-		await ruffle.ensure()
+		await ruffle.ensure(_recover_download)
 	var dest := Cartridge.cache_dir(table)
 	if not DirAccess.dir_exists_absolute(ProjectSettings.globalize_path(dest)):
 		if not iq.is_available():
@@ -2209,7 +2274,8 @@ func _launch_via_navigator(
 	var ok := await packs.ensure_for(
 		meta,
 		_on_progress,
-		func(label: String) -> void: _set_job(label)
+		func(label: String) -> void: _set_job(label),
+		_recover_download
 	)
 	_refresh_nav_chip()
 	if not ok:
@@ -2236,7 +2302,10 @@ func _launch_via_navigator(
 		_set_busy(false)
 		_set_job("No launch URL.")
 		return
-	var pid := packs.play_app(meta, local_movie, original)
+	var oc := await _prepare_throttle(meta)
+	var pid := packs.play_app(meta, local_movie, original, _throttle_mhz(meta) if not oc.is_empty() else 0)
+	if pid != -1:
+		await _await_player_window()
 	_set_busy(false)
 	var tag := "Trial" if trial else "Play"
 	if pid == -1:
@@ -2265,8 +2334,11 @@ func _launch_via_ruffle(dest: String, meta: Dictionary, trial: bool, file: Strin
 		if rel_swf.is_empty():
 			rel_swf = _rel_under(serve_root, file)
 		if rel_swf.is_empty():
+			var oc0 := await _prepare_throttle(meta)
+			var pid := ruffle.play(file, "", "", "", _throttle_mhz(meta) if not oc0.is_empty() else 0, oc0)
+			if pid != -1:
+				await _await_player_window()
 			_set_busy(false)
-			var pid := ruffle.play(file)
 			_finish_ruffle(pid, trial, file)
 			return
 		movie = "http://" + rel_swf
@@ -2277,13 +2349,21 @@ func _launch_via_ruffle(dest: String, meta: Dictionary, trial: bool, file: Strin
 		if rel.is_empty():
 			rel = Unzip.path_from_launch(launch)
 		if rel.is_empty():
+			var oc := await _prepare_throttle(meta)
+			var pid := ruffle.play(file, "", "", "", _throttle_mhz(meta) if not oc.is_empty() else 0, oc)
+			if pid != -1:
+				await _await_player_window()
 			_set_busy(false)
-			var pid := ruffle.play(file)
 			_finish_ruffle(pid, trial, file)
 			return
 		movie = "http://" + rel
 	var proxy := "http://127.0.0.1:%d" % port
-	var pid := ruffle.play(movie, "", proxy, movie)
+	var oc := await _prepare_throttle(meta)
+	var pid := ruffle.play(
+		movie, "", proxy, movie, _throttle_mhz(meta) if not oc.is_empty() else 0, oc
+	)
+	if pid != -1:
+		await _await_player_window()
 	_set_busy(false)
 	_finish_ruffle(pid, trial, movie)
 
@@ -2309,7 +2389,7 @@ func _finish_ruffle(pid: int, trial: bool, movie: String) -> void:
 func _launch_via_spr(dest: String, meta: Dictionary, trial: bool) -> void:
 	_set_job("Fetching Shockwave projector…")
 	TempleTheme.paint_chip(_spr_label, "SPR  …", TempleTheme.AMBER)
-	var ok := await spr.ensure(_on_progress)
+	var ok := await spr.ensure(_on_progress, _recover_download)
 	_refresh_spr_chip()
 	if not ok:
 		_log(spr.last_error)
@@ -2352,7 +2432,10 @@ func _launch_via_spr(dest: String, meta: Dictionary, trial: bool) -> void:
 			return
 		movie = "http://" + rel
 	var extra := Unzip.extra_args(launch)
-	var pid := spr.play(movie, extra, pj)
+	var oc := await _prepare_throttle(meta)
+	var pid := spr.play(movie, extra, pj, _throttle_mhz(meta) if not oc.is_empty() else 0, oc)
+	if pid != -1:
+		await _await_player_window()
 	_set_busy(false)
 	var tag := "Trial" if trial else "Play"
 	if pid == -1:
@@ -2388,17 +2471,17 @@ func _launch_entry(dest: String, meta: Dictionary, trial: bool) -> void:
 		var flash_html := str(meta.get("platform", "")).to_lower().find("flash") >= 0
 		if flash_html:
 			if ruffle.exe_path.is_empty() or not ruffle.has_web():
-				await ruffle.ensure()
+				await ruffle.ensure(_recover_download)
 			if ruffle.has_web():
 				await _launch_via_local_html(dest, meta, trial, file, true)
 				return
 			if not swf.is_empty():
-				_launch_via_ruffle(dest, meta, trial, swf)
+				await _launch_via_ruffle(dest, meta, trial, swf)
 				return
 		await _launch_via_local_html(dest, meta, trial, file, false)
 		return
 	if Flashpoint.uses_ruffle(meta) or not swf.is_empty() or (not file.is_empty() and file.to_lower().ends_with(".swf")):
-		_launch_via_ruffle(dest, meta, trial, swf if not swf.is_empty() else file)
+		await _launch_via_ruffle(dest, meta, trial, swf if not swf.is_empty() else file)
 		return
 	_set_busy(false)
 	OS.shell_open(file)
@@ -2723,10 +2806,17 @@ func _set_searching(on: bool, message: String = "LOADING…") -> void:
 		if _archive_empty:
 			_archive_empty.visible = false
 		_set_job(message)
-	set_process(on)
+	set_process(on or _player_waiting)
 
 
 func _process(dt: float) -> void:
+	if _player_waiting:
+		_search_spin += dt * 3.2
+		if _player_veil:
+			_player_veil.color.a = 0.62 + 0.18 * sin(_search_spin)
+		if _player_wait_label:
+			_player_wait_label.modulate.a = 0.7 + 0.3 * abs(sin(_search_spin * 1.4))
+		return
 	if not _searching:
 		return
 	_search_spin += dt * 3.2
@@ -2823,6 +2913,187 @@ func _toggle_log() -> void:
 		_log_btn.text = "LOG  −" if _log_open else "LOG  +"
 
 
+func _show_player_wait(on: bool, message: String = "LOADING PLAYER…") -> void:
+	_player_waiting = on
+	_search_spin = 0.0
+	if _player_veil:
+		_player_veil.visible = on
+	if _player_wait_label and on:
+		_player_wait_label.text = message.to_upper()
+	if on:
+		_set_job(message)
+		set_process(true)
+	elif not _searching:
+		set_process(false)
+
+
+func _await_player_window() -> void:
+	_show_player_wait(true)
+	var start := Time.get_ticks_msec()
+	while Time.get_ticks_msec() - start < 12000:
+		if Spr.player_ready():
+			break
+		await get_tree().process_frame
+	_show_player_wait(false)
+
+
+func _recover_download(label: String, archive: String) -> bool:
+	var choice := await _missing_runtime_prompt(label)
+	var kind := str(choice.get("kind", ""))
+	if kind == "file":
+		var src := str(choice.get("path", "")).strip_edges()
+		if src.is_empty() or not FileAccess.file_exists(src):
+			return false
+		DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(archive).get_base_dir())
+		var bytes := FileAccess.get_file_as_bytes(src)
+		var out := FileAccess.open(archive, FileAccess.WRITE)
+		if out == null:
+			return false
+		out.store_buffer(bytes)
+		out.close()
+		_log("Using local file for %s." % label)
+		return FileAccess.file_exists(archive)
+	if kind == "signature":
+		var sig := str(choice.get("signature", "")).strip_edges()
+		if sig.is_empty():
+			return false
+		if not iq.is_available():
+			_set_job("No host to read that signature.")
+			return false
+		var bytes := PackedByteArray()
+		for c in _chain_order():
+			_set_job("Reading %s on %s…" % [label, c.to_upper()])
+			var doc: Variant = await iq.read_code_in(sig, c, _on_progress)
+			bytes = _bytes_from_inscription(doc)
+			if bytes.size() > 32:
+				break
+		if bytes.size() <= 32:
+			_set_job("That signature had no file on MON, SOL, or RH.")
+			return false
+		DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(archive).get_base_dir())
+		var out := FileAccess.open(archive, FileAccess.WRITE)
+		if out == null:
+			return false
+		out.store_buffer(bytes)
+		out.close()
+		_log("Using chain signature for %s." % label)
+		return true
+	return false
+
+
+func _chain_order() -> PackedStringArray:
+	var out := PackedStringArray([chain])
+	for c in ["mon", "sol", "rh"]:
+		if c != chain:
+			out.append(c)
+	return out
+
+
+func _bytes_from_inscription(result: Variant) -> PackedByteArray:
+	if result is PackedByteArray:
+		return result
+	if result is Dictionary:
+		var raw: Variant = (result as Dictionary).get("data", (result as Dictionary).get("bytes", null))
+		if raw is PackedByteArray:
+			return raw
+		if raw is String:
+			var decoded := Marshalls.base64_to_raw(str(raw))
+			if decoded.size() > 32:
+				return decoded
+			return str(raw).to_utf8_buffer()
+	if result is String:
+		var decoded2 := Marshalls.base64_to_raw(str(result))
+		if decoded2.size() > 32:
+			return decoded2
+	return PackedByteArray()
+
+
+func _missing_runtime_prompt(label: String) -> Dictionary:
+	var veil := ColorRect.new()
+	veil.color = Color(0, 0, 0, 0.84)
+	veil.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
+	veil.mouse_filter = Control.MOUSE_FILTER_STOP
+	veil.z_index = 80
+	add_child(veil)
+	var centre := CenterContainer.new()
+	centre.set_anchors_and_offsets_preset(PRESET_FULL_RECT)
+	centre.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	veil.add_child(centre)
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size = Vector2(560, 0)
+	panel.add_theme_stylebox_override("panel", TempleTheme.dialog_box())
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	centre.add_child(panel)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 12)
+	panel.add_child(box)
+	box.add_child(TempleTheme.title(MISSING_RUNTIME, TempleTheme.AMBER))
+	var body := TempleTheme.line(
+		"Could not fetch %s. Choose the zip on disk, or a signature on MON, SOL, or RH." % label,
+		TempleTheme.GREY,
+		TempleTheme.SIZE_BODY
+	)
+	body.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	body.custom_minimum_size = Vector2(520, 0)
+	box.add_child(body)
+	var sig := LineEdit.new()
+	sig.placeholder_text = "signature"
+	sig.custom_minimum_size = Vector2(0, 28)
+	box.add_child(sig)
+	box.add_child(TempleTheme.rule(TempleTheme.AMBER))
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 10)
+	row.alignment = BoxContainer.ALIGNMENT_END
+	box.add_child(row)
+	var state := {"done": false, "kind": "", "path": "", "signature": ""}
+	var finish := func(kind: String) -> void:
+		if bool(state.done):
+			return
+		state.kind = kind
+		state.signature = sig.text.strip_edges()
+		state.done = true
+	row.add_child(TempleTheme.button("CANCEL", finish.bind("")))
+	row.add_child(TempleTheme.button("FILE", finish.bind("file")))
+	row.add_child(TempleTheme.primary_button("SIGNATURE", finish.bind("signature")))
+	sig.grab_focus()
+	while not bool(state.done):
+		await get_tree().process_frame
+	var kind := str(state.kind)
+	veil.queue_free()
+	if kind == "file":
+		var picked := await _pick_runtime_zip()
+		if picked.is_empty():
+			return {}
+		state.path = picked
+	if kind.is_empty():
+		return {}
+	return {"kind": kind, "path": str(state.path), "signature": str(state.signature)}
+
+
+func _pick_runtime_zip() -> String:
+	var state := {"done": false, "ok": false, "path": ""}
+	var err := DisplayServer.file_dialog_show(
+		"Runtime zip",
+		OS.get_environment("USERPROFILE"),
+		"",
+		false,
+		DisplayServer.FILE_DIALOG_MODE_OPEN_FILE,
+		PackedStringArray(["*.zip"]),
+		func(status: bool, paths: PackedStringArray, _filter: int) -> void:
+			state.ok = status
+			if status and paths.size() > 0:
+				state.path = str(paths[0])
+			state.done = true
+	)
+	if err != OK:
+		return ""
+	while not bool(state.done):
+		await get_tree().process_frame
+	if not bool(state.ok):
+		return ""
+	return str(state.path).strip_edges()
+
+
 func _set_busy(on: bool) -> void:
 	_busy = on
 	if _search_btn:
@@ -2855,6 +3126,8 @@ func _load_config() -> void:
 			fp_host.set_root(fp)
 		if (parsed as Dictionary).has("view_grid"):
 			_view_grid = bool((parsed as Dictionary).get("view_grid", true))
+		if (parsed as Dictionary).has("authentic"):
+			_authentic = bool((parsed as Dictionary).get("authentic", true))
 	if fp_host.root.is_empty():
 		fp_host.autodetect()
 
@@ -2864,6 +3137,11 @@ func _save_config() -> void:
 	if file == null:
 		return
 	file.store_string(
-		JSON.stringify({"chain": chain, "flashpoint_root": fp_host.root, "view_grid": _view_grid})
+		JSON.stringify({
+			"chain": chain,
+			"flashpoint_root": fp_host.root,
+			"view_grid": _view_grid,
+			"authentic": _authentic,
+		})
 	)
 	file.close()

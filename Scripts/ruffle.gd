@@ -35,7 +35,7 @@ func exe_for(installed_tag: String) -> String:
 
 ## Download the latest stable if we do not already have it. Returns false if
 ## we still have no binary afterwards.
-func ensure() -> bool:
+func ensure(recover: Callable = Callable()) -> bool:
 	last_error = ""
 	var installed := current_tag()
 	if not installed.is_empty():
@@ -46,14 +46,16 @@ func ensure() -> bool:
 
 	var release: Dictionary = await _github_latest()
 	if release.is_empty():
-		if not exe_path.is_empty():
+		if not exe_path.is_empty() and FileAccess.file_exists(exe_path):
 			return true
-		return false
+		return await _recover_install(recover)
 
 	var latest := str(release.get("tag_name", "")).strip_edges()
 	if latest.is_empty():
 		last_error = "GitHub release had no tag."
-		return not exe_path.is_empty()
+		if not exe_path.is_empty() and FileAccess.file_exists(exe_path):
+			return true
+		return await _recover_install(recover)
 
 	if latest == installed and FileAccess.file_exists(exe_path):
 		tag = latest
@@ -64,7 +66,9 @@ func ensure() -> bool:
 	if url.is_empty():
 		last_error = "No Ruffle asset for this OS in %s." % latest
 		await _ensure_web(release, latest)
-		return not exe_path.is_empty()
+		if not exe_path.is_empty() and FileAccess.file_exists(exe_path):
+			return true
+		return await _recover_install(recover)
 
 	var archive := "user://bin/ruffle-download"
 	var suffix := _asset_suffix()
@@ -72,19 +76,25 @@ func ensure() -> bool:
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://bin"))
 	if not await _download(url, archive):
 		await _ensure_web(release, latest)
-		return not exe_path.is_empty()
+		if not exe_path.is_empty() and FileAccess.file_exists(exe_path):
+			return true
+		return await _recover_install(recover)
 
 	var dest := "%s/%s" % [BIN_ROOT, latest]
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dest))
 	if not _extract(archive, dest):
 		await _ensure_web(release, latest)
-		return not exe_path.is_empty()
+		if not exe_path.is_empty() and FileAccess.file_exists(exe_path):
+			return true
+		return await _recover_install(recover)
 
 	var found := exe_for(latest)
 	if found.is_empty() or not FileAccess.file_exists(found):
 		last_error = "Extracted Ruffle but could not find the executable."
 		await _ensure_web(release, latest)
-		return not exe_path.is_empty()
+		if not exe_path.is_empty() and FileAccess.file_exists(exe_path):
+			return true
+		return await _recover_install(recover)
 
 	_write_version(latest)
 	if not installed.is_empty() and installed != latest:
@@ -92,6 +102,32 @@ func ensure() -> bool:
 	tag = latest
 	exe_path = found
 	await _ensure_web(release, latest)
+	if not exe_path.is_empty() and FileAccess.file_exists(exe_path):
+		return true
+	return await _recover_install(recover)
+
+
+func _recover_install(recover: Callable) -> bool:
+	if not exe_path.is_empty() and FileAccess.file_exists(exe_path):
+		return true
+	if not recover.is_valid():
+		return false
+	var archive := "user://bin/ruffle-download.zip"
+	if not await recover.call("Ruffle", archive):
+		return false
+	if not FileAccess.file_exists(archive):
+		return false
+	var dest := "%s/recovered" % BIN_ROOT
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(dest))
+	if not _extract(archive, dest):
+		return false
+	var found := exe_for("recovered")
+	if found.is_empty() or not FileAccess.file_exists(found):
+		last_error = "Provided Ruffle archive had no executable."
+		return false
+	_write_version("recovered")
+	tag = "recovered"
+	exe_path = found
 	return true
 
 
@@ -235,7 +271,9 @@ func play(
 	swf_path: String,
 	base_dir: String = "",
 	proxy: String = "",
-	spoof_url: String = ""
+	spoof_url: String = "",
+	throttle_mhz: int = 0,
+	throttle_exe: String = ""
 ) -> int:
 	if exe_path.is_empty() or not FileAccess.file_exists(exe_path):
 		last_error = "Ruffle is not installed yet."
@@ -253,7 +291,7 @@ func play(
 		movie = ProjectSettings.globalize_path(swf_path)
 	var args := cli_args(movie, base_dir, proxy, spoof_url, save_dir())
 	if OS.get_name() == "Windows":
-		_pid = Spr.launch_shown(exe_path, args)
+		_pid = Spr.launch_shown(exe_path, args, "", throttle_mhz, throttle_exe)
 	else:
 		_pid = OS.create_process(exe_path, args, false)
 	if _pid == -1:

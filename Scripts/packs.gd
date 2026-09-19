@@ -147,9 +147,23 @@ static func pack_id_for(entry: Dictionary) -> String:
 		return "supportpack-viscape"
 	if plat.find("vrml") >= 0 or app.find("startcosmo") >= 0:
 		return "supportpack-vrml"
+	if app.find("netscape") >= 0:
+		return "supportpack-common-netscape"
 	if app.find("secureplayer") >= 0:
 		return "supportpack-common-secureplayer"
 	return "supportpack-common-fpnavigator"
+
+
+func oldcpu_exe() -> String:
+	var p := _pack_root().path_join("OldCPUSimulator").path_join("OldCPUSimulator.exe")
+	if FileAccess.file_exists(p):
+		return p
+	return _find_named(_pack_root(), "oldcpusimulator.exe")
+
+
+func ensure_oldcpu(progress: Callable = Callable(), recover: Callable = Callable()) -> bool:
+	await _load_index()
+	return await _ensure_id("supportpack-common-oldcpusimulator", progress, recover)
 
 
 func has_navigator() -> bool:
@@ -227,7 +241,8 @@ func resolve_app(application_path: String) -> String:
 func ensure_for(
 	entry: Dictionary,
 	progress: Callable = Callable(),
-	status: Callable = Callable()
+	status: Callable = Callable(),
+	recover: Callable = Callable()
 ) -> bool:
 	last_error = ""
 	if OS.get_name() != "Windows":
@@ -240,7 +255,7 @@ func ensure_for(
 	for id in ids:
 		if status.is_valid():
 			status.call(pack_label(id))
-		if not await _ensure_id(id, progress):
+		if not await _ensure_id(id, progress, recover):
 			if id == pack_id_for(entry) or id == "supportpack-common-secureplayer":
 				return can_play(entry) and FileAccess.file_exists(resolve_app(str(entry.get("applicationPath", ""))))
 	if progress.is_valid():
@@ -272,7 +287,7 @@ func configure_proxy(port: int) -> bool:
 	return true
 
 
-func play_url(movie: String) -> int:
+func play_url(movie: String, throttle_mhz: int = 0) -> int:
 	var exe := navigator_exe()
 	if exe.is_empty() or not FileAccess.file_exists(exe):
 		last_error = "Flashpoint Navigator is not installed yet."
@@ -281,7 +296,7 @@ func play_url(movie: String) -> int:
 	DirAccess.make_dir_recursive_absolute(profile)
 	var args := PackedStringArray(["-no-remote", "-profile", profile, movie])
 	if OS.get_name() == "Windows":
-		_pid = Spr.launch_shown(exe, args)
+		_pid = Spr.launch_shown(exe, args, "", throttle_mhz, oldcpu_exe())
 	else:
 		_pid = OS.create_process(exe, args, false)
 	if _pid == -1:
@@ -289,15 +304,21 @@ func play_url(movie: String) -> int:
 	return _pid
 
 
-func play_app(entry: Dictionary, local_movie: String, original_movie: String = "") -> int:
+func play_app(
+	entry: Dictionary,
+	local_movie: String,
+	original_movie: String = "",
+	throttle_mhz: int = 0
+) -> int:
 	var root := _pack_root()
+	var oc := oldcpu_exe() if throttle_mhz > 0 else ""
 	var sp := secureplayer_exe()
 	var inv := secureplayer_invocation(entry, local_movie, original_movie)
 	if not inv.is_empty() and FileAccess.file_exists(sp):
 		mark_compat(sp)
 		mark_compat(root.path_join("ShiVa3D").path_join("S3DEngine.exe"))
 		if OS.get_name() == "Windows":
-			_pid = Spr.launch_shown(sp, inv, root)
+			_pid = Spr.launch_shown(sp, inv, root, throttle_mhz, oc)
 		else:
 			_pid = OS.create_process(sp, inv, false)
 		if _pid == -1:
@@ -309,18 +330,18 @@ func play_app(entry: Dictionary, local_movie: String, original_movie: String = "
 		return -1
 	var lower := app.to_lower()
 	if lower.ends_with("fpnavigator.exe") or lower.ends_with("startchrome.bat"):
-		return play_url(local_movie)
+		return play_url(local_movie, throttle_mhz)
 	var argv := launch_argv(entry, local_movie)
 	var cwd := app.get_base_dir()
 	if lower.ends_with(".bat"):
 		var bat_args := PackedStringArray(["/c", "call", app])
 		bat_args.append_array(argv)
 		if OS.get_name() == "Windows":
-			_pid = Spr.launch_shown("cmd.exe", bat_args, cwd)
+			_pid = Spr.launch_shown("cmd.exe", bat_args, cwd, throttle_mhz, oc)
 		else:
 			_pid = OS.create_process(app, argv, false)
 	elif OS.get_name() == "Windows":
-		_pid = Spr.launch_shown(app, argv, cwd)
+		_pid = Spr.launch_shown(app, argv, cwd, throttle_mhz, oc)
 	else:
 		_pid = OS.create_process(app, argv, false)
 	if _pid == -1:
@@ -350,7 +371,7 @@ func _collect_ids(index: Dictionary, id: String, out: PackedStringArray) -> void
 				_collect_ids(index, str(d), out)
 
 
-func _ensure_id(id: String, progress: Callable = Callable()) -> bool:
+func _ensure_id(id: String, progress: Callable = Callable(), recover: Callable = Callable()) -> bool:
 	var marker := "%s/VERSION-%s" % [BIN_ROOT, id.get_file()]
 	var rec: Dictionary = _index.get(id, {})
 	var want := str(rec.get("hash", "pack"))
@@ -363,6 +384,12 @@ func _ensure_id(id: String, progress: Callable = Callable()) -> bool:
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(BIN_ROOT))
 	var archive := "user://bin/%s-download.zip" % id.get_file()
 	if not await _download(ZIP_URL % id, archive, progress):
+		var label := pack_label(id).replace("Fetching ", "").strip_edges()
+		if label.is_empty():
+			label = id.get_file()
+		if not (recover.is_valid() and await recover.call(label, archive)):
+			return false
+	if not FileAccess.file_exists(archive):
 		return false
 	if not _extract(archive, BIN_ROOT):
 		return false

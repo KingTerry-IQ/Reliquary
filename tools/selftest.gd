@@ -244,6 +244,46 @@ func _run() -> void:
 		not Flashpoint.uses_browser({"platform": "Unity", "launchCommand": "http://x/index.html"})
 	)
 	_check(
+		"Vitalize uses the plugin host",
+		FlashpointHost.needs_flashpoint({
+			"platform": "Vitalize",
+			"applicationPath": "FPSoftware\\fpnavigator-portable\\FPNavigator.exe",
+			"launchCommand": "http://koti.mbnet.fi/~wicked/skede_hacked.ccn",
+		})
+	)
+	_check(
+		"WildTangent template prefix uses the plugin host",
+		FlashpointHost.needs_flashpoint({
+			"platform": "WildTangent",
+			"applicationPath": "FPSoftware\\FlashpointSecurePlayer.exe",
+			"launchCommand": "wildtangent http://localwt/speedway/INDEX.HTM",
+		})
+	)
+	_check(
+		"SVG plugin prefix uses the plugin host",
+		FlashpointHost.needs_flashpoint({
+			"platform": "SVG",
+			"applicationPath": "FPSoftware\\FlashpointSecurePlayer.exe",
+			"launchCommand": "svg http://www.adobe.com/svg/demos/chart.html",
+		})
+	)
+	_check(
+		"Netscape start bat uses the plugin host",
+		FlashpointHost.needs_flashpoint({
+			"platform": "EVA",
+			"applicationPath": "FPSoftware\\startNetscape.bat",
+			"launchCommand": "http://www.sharp.co.jp/sc/excite/evademo/try/scr/girl.eva",
+		})
+	)
+	_check(
+		"Flash HTML stays local",
+		not FlashpointHost.needs_flashpoint({
+			"platform": "Flash",
+			"applicationPath": "FPSoftware\\Flash\\flashplayer_32_sa.exe",
+			"launchCommand": "http://x/game.html",
+		})
+	)
+	_check(
 		"shockwave dcr needs SPR",
 		FlashpointHost.needs_shockwave({"platform": "Shockwave", "launchCommand": "http://x/a.dcr"})
 	)
@@ -301,6 +341,26 @@ func _run() -> void:
 	_check(
 		"SPR Windows launch allows foreground",
 		Spr.LAUNCH_PS1.find("AllowSetForegroundWindow(-1)") >= 0
+	)
+	_check(
+		"SPR Windows launch raises child process windows",
+		Spr.LAUNCH_PS1.find("ParentProcessId") >= 0
+	)
+	_check(
+		"era-speed host console stays hidden",
+		Spr.LAUNCH_PS1.find("CreateNoWindow") >= 0 and Spr.LAUNCH_PS1.find("HideHost") >= 0
+	)
+	_check(
+		"era-speed skips raising the console window",
+		Spr.LAUNCH_PS1.find("ConsoleWindowClass") >= 0
+	)
+	_check(
+		"player ready file is written when a window appears",
+		Spr.LAUNCH_PS1.find("ReadyFile") >= 0 and Spr.LAUNCH_PS1.find("HasVisible") >= 0
+	)
+	_check(
+		"missing runtime prompt has a heading",
+		preload("res://Scenes/main.gd").MISSING_RUNTIME == "MISSING RUNTIME"
 	)
 	var pl := Flashpoint.parse_playlist_ids({
 		"title": "X",
@@ -414,6 +474,58 @@ func _run() -> void:
 		not LocalHttp.is_filesystem_rel("cache.lego.com/eng/games/spybotics/spynet/sound_level_1.cct")
 	)
 	_check(
+		"htm folds onto html",
+		LocalHttp.alt_rels("game/INDEX.HTM").find("game/INDEX.html") >= 0
+	)
+	_check(
+		"www fold strips the www prefix",
+		LocalHttp.www_fold_rel("www.lego.com/eng/game.swf") == "lego.com/eng/game.swf"
+	)
+	_check(
+		"www fold adds the www prefix",
+		LocalHttp.www_fold_rel("lego.com/eng/game.swf") == "www.lego.com/eng/game.swf"
+	)
+	_check(
+		"crossdomain stub is a policy file",
+		LocalHttp.policy_body("site/crossdomain.xml").find("allow-access-from") >= 0
+	)
+	_check(
+		"swa is a Director type",
+		LocalHttp.mime_for("music.swa") == "application/x-director"
+	)
+	_check(
+		"w3d is a Director type",
+		LocalHttp.mime_for("mesh.w3d") == "application/x-director"
+	)
+	_check("html mime has no charset", LocalHttp.mime_for("index.html") == "text/html")
+	_check(
+		"cpu mhz from OldCPUSimulator -t",
+		Unzip.cpu_mhz(oldcpu) == 366
+	)
+	_check(
+		"curation -t wins when authentic is off",
+		Unzip.era_mhz({"releaseDate": "2008"}, oldcpu, false) == 366
+	)
+	_check(
+		"era mhz follows release year",
+		Unzip.era_mhz({"releaseDate": "2002-06-01", "launchCommand": "http://x/a.dcr"}, "", true)
+		== 800
+	)
+	_check(
+		"modern speed skips throttle without -t",
+		Unzip.era_mhz({"releaseDate": "2002", "launchCommand": "http://x/a.swf"}, "", false) == 0
+	)
+	var oc_args := Spr.oldcpu_args(800, "C:/SPR.exe", PackedStringArray(["http://x/a.dcr"]))
+	_check(
+		"oldcpu wraps the player after -sw",
+		oc_args.size() >= 7
+		and oc_args[0] == "-t"
+		and oc_args[1] == "800"
+		and oc_args[5] == "-sw"
+		and oc_args[6] == "C:/SPR.exe"
+		and oc_args[7] == "http://x/a.dcr"
+	)
+	_check(
 		"ruffle asset ignores host mapping",
 		LocalHttp.ruffle_asset_rel("tetrisow-a.akamaihd.net/__ruffle/ruffle.js") == "ruffle.js"
 	)
@@ -466,6 +578,14 @@ func _run() -> void:
 		"Java maps to the Java support pack",
 		Packs.pack_id_for({"platform": "Java", "launchCommand": "http://x/index.html"})
 		== "supportpack-java"
+	)
+	_check(
+		"Netscape start bat maps to the Netscape pack",
+		Packs.pack_id_for({
+			"platform": "EVA",
+			"applicationPath": "FPSoftware\\startNetscape.bat",
+		})
+		== "supportpack-common-netscape"
 	)
 	_check("Navigator prefs pin HTTP proxy", Packs.NAV_PREFS.find("network.proxy.http_port") >= 0)
 	var shiva_inv := Packs.secureplayer_invocation(
@@ -687,6 +807,21 @@ func _check_launch_resolve() -> void:
 	)
 	_write_probe(root.path_join("content/cache.lego.com/eng/games/spybotics/spynet/spybot_0807_sw.dcr"))
 	_write_probe(root.path_join("content/cache.lego.com/eng/games/spybotics/spynet/sound_level_1.cct"))
+	_write_probe(root.path_join("content/www.example.com/game/index.htm"))
+	_check(
+		"www host request finds the archive without www",
+		LocalHttp.file_in_tree(root.path_join("content"), "example.com/game/index.htm")
+		.replace("\\", "/")
+		.ends_with("/www.example.com/game/index.htm")
+	)
+	_check(
+		"directory index prefers htm when html is absent",
+		LocalHttp.index_file(
+			ProjectSettings.globalize_path(root.path_join("content/www.example.com/game"))
+		)
+		.replace("\\", "/")
+		.ends_with("/index.htm")
+	)
 	var spy_root := root.path_join("content")
 	_check(
 		"director cst request folds onto the published cct",

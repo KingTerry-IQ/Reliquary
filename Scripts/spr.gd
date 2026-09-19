@@ -11,12 +11,16 @@ const ZIP_URL := "https://nexus-dev.unstable.life/repository/stable/supportpack-
 const UA := "Reliquary/0.1 (GodOnChain; SPR fetch)"
 const DEFAULT_PJ := "PJ101"
 ## Windows create_process starts Director/SPR hidden; shell-launch and raise.
+const PID_RES := "user://bin/spr-launch.pid"
+const READY_RES := "user://bin/spr-ready.flag"
 const LAUNCH_PS1 := r"""
 param(
   [Parameter(Mandatory = $true)][string]$Exe,
   [Parameter(Mandatory = $true)][string]$Cwd,
   [Parameter(Mandatory = $true)][string]$PidFile,
   [string]$ArgFile = '',
+  [string]$ReadyFile = '',
+  [switch]$HideHost,
   [int]$RaiseMs = 8000
 )
 $ErrorActionPreference = 'Stop'
@@ -37,12 +41,21 @@ public static class SprWin {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);
   [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr h, int n);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   static int _pid;
+  static bool _found;
+  static bool IsConsole(IntPtr h) {
+    var sb = new System.Text.StringBuilder(256);
+    GetClassName(h, sb, 256);
+    var n = sb.ToString();
+    return n == "ConsoleWindowClass" || n == "CASCADIA_HOSTING_WINDOW_CLASS";
+  }
   static bool Cb(IntPtr h, IntPtr l) {
     uint wpid;
     GetWindowThreadProcessId(h, out wpid);
     if (wpid != (uint)_pid) return true;
+    if (IsConsole(h)) return true;
     if ((GetWindowLongPtr(h, -20).ToInt64() & 0x80L) != 0) return true;
     if (!IsWindowVisible(h) && !IsIconic(h)) return true;
     if (IsIconic(h)) ShowWindowAsync(h, 9);
@@ -62,6 +75,22 @@ public static class SprWin {
     AllowSetForegroundWindow(-1);
     EnumWindows(new EnumProc(Cb), IntPtr.Zero);
   }
+  static bool CbFind(IntPtr h, IntPtr l) {
+    uint wpid;
+    GetWindowThreadProcessId(h, out wpid);
+    if (wpid != (uint)_pid) return true;
+    if (IsConsole(h)) return true;
+    if ((GetWindowLongPtr(h, -20).ToInt64() & 0x80L) != 0) return true;
+    if (!IsWindowVisible(h) && !IsIconic(h)) return true;
+    _found = true;
+    return false;
+  }
+  public static bool HasVisible(int pid) {
+    _pid = pid;
+    _found = false;
+    EnumWindows(new EnumProc(CbFind), IntPtr.Zero);
+    return _found;
+  }
 }
 '@
 } catch {}
@@ -74,8 +103,14 @@ try { [SprWin]::AllowSetForegroundWindow(-1) } catch {}
 $psi = New-Object System.Diagnostics.ProcessStartInfo
 $psi.FileName = $Exe
 $psi.WorkingDirectory = $Cwd
-$psi.UseShellExecute = $true
-$psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+if ($HideHost) {
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+} else {
+  $psi.UseShellExecute = $true
+  $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+}
 if ($SprArgs.Count -gt 0) {
   $quoted = foreach ($a in $SprArgs) {
     if ($null -eq $a) { continue }
@@ -87,9 +122,39 @@ if ($SprArgs.Count -gt 0) {
 $p = [System.Diagnostics.Process]::Start($psi)
 if (-not $p) { exit 1 }
 Set-Content -LiteralPath $PidFile -Value $p.Id -Encoding ASCII
+function Get-TreePids([int]$id) {
+  $acc = New-Object 'System.Collections.Generic.List[int]'
+  $acc.Add($id) | Out-Null
+  $q = New-Object System.Collections.Queue
+  $q.Enqueue($id)
+  while ($q.Count -gt 0) {
+    $cur = [int]$q.Dequeue()
+    try {
+      Get-CimInstance Win32_Process -Filter "ParentProcessId=$cur" -ErrorAction SilentlyContinue | ForEach-Object {
+        $cid = [int]$_.ProcessId
+        if (-not $acc.Contains($cid)) {
+          $acc.Add($cid) | Out-Null
+          $q.Enqueue($cid)
+        }
+      }
+    } catch {}
+  }
+  return $acc
+}
 $deadline = [datetime]::UtcNow.AddMilliseconds($RaiseMs)
+$ready = $false
 do {
-  try { [SprWin]::Raise([int]$p.Id) } catch {}
+  foreach ($id in Get-TreePids([int]$p.Id)) {
+    try { [SprWin]::Raise($id) } catch {}
+    if (-not $ready -and $ReadyFile) {
+      try {
+        if ([SprWin]::HasVisible($id)) {
+          Set-Content -LiteralPath $ReadyFile -Value '1' -Encoding ASCII
+          $ready = $true
+        }
+      } catch {}
+    }
+  }
   Start-Sleep -Milliseconds 250
   $p.Refresh()
 } while (-not $p.HasExited -and [datetime]::UtcNow -lt $deadline)
@@ -140,7 +205,7 @@ func exe_for(pj: String = DEFAULT_PJ) -> String:
 	return _find_exe(_pack_root(), pj)
 
 
-func ensure(progress: Callable = Callable()) -> bool:
+func ensure(progress: Callable = Callable(), recover: Callable = Callable()) -> bool:
 	last_error = ""
 	if OS.get_name() != "Windows":
 		last_error = "Shockwave projector is Windows-only."
@@ -155,7 +220,7 @@ func ensure(progress: Callable = Callable()) -> bool:
 
 	var latest := await _remote_hash()
 	if latest.is_empty():
-		if not tag.is_empty():
+		if has_runtime():
 			return true
 		latest = "pack"
 	if latest == installed and has_runtime():
@@ -167,6 +232,13 @@ func ensure(progress: Callable = Callable()) -> bool:
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://bin"))
 	var archive := "user://bin/shockwave-download.zip"
 	if not await _download(ZIP_URL, archive, progress):
+		if has_runtime():
+			return true
+		if recover.is_valid() and await recover.call("Shockwave projector", archive):
+			pass
+		else:
+			return false
+	if not FileAccess.file_exists(archive):
 		return has_runtime()
 
 	var dest := "%s/%s" % [BIN_ROOT, latest]
@@ -205,7 +277,13 @@ func configure_proxy(proxy_port: int, pj: String = DEFAULT_PJ) -> bool:
 	return true
 
 
-func play(movie: String, extra: PackedStringArray = PackedStringArray(), pj: String = DEFAULT_PJ) -> int:
+func play(
+	movie: String,
+	extra: PackedStringArray = PackedStringArray(),
+	pj: String = DEFAULT_PJ,
+	throttle_mhz: int = 0,
+	throttle_exe: String = ""
+) -> int:
 	var exe := exe_for(pj)
 	if exe.is_empty() or not FileAccess.file_exists(exe):
 		last_error = "SPR.exe is not installed yet."
@@ -213,7 +291,7 @@ func play(movie: String, extra: PackedStringArray = PackedStringArray(), pj: Str
 	var args := PackedStringArray([movie])
 	args.append_array(extra)
 	if OS.get_name() == "Windows":
-		_pid = launch_shown(exe, args)
+		_pid = launch_shown(exe, args, "", throttle_mhz, throttle_exe)
 	else:
 		_pid = OS.create_process(exe, args, false)
 	if _pid == -1:
@@ -221,27 +299,62 @@ func play(movie: String, extra: PackedStringArray = PackedStringArray(), pj: Str
 	return _pid
 
 
+## OldCPUSimulator: `-t N -sw player.exe` then the player's own args.
+static func oldcpu_args(mhz: int, exe: String, args: PackedStringArray) -> PackedStringArray:
+	var out := PackedStringArray([
+		"-t",
+		str(maxi(mhz, 1)),
+		"-r",
+		"60",
+		"-a1",
+		"-sw",
+		exe,
+	])
+	out.append_array(args)
+	return out
+
+
 ## Godot create_process uses CREATE_NO_WINDOW; raise a normal player window.
-static func launch_shown(exe: String, args: PackedStringArray, work_dir: String = "") -> int:
+static func launch_shown(
+	exe: String,
+	args: PackedStringArray,
+	work_dir: String = "",
+	throttle_mhz: int = 0,
+	throttle_exe: String = ""
+) -> int:
+	var run_exe := exe
+	var run_args := args
+	if (
+		throttle_mhz > 0
+		and not throttle_exe.is_empty()
+		and FileAccess.file_exists(throttle_exe)
+	):
+		run_args = oldcpu_args(throttle_mhz, exe, args)
+		run_exe = throttle_exe
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://bin"))
 	var script_res := "user://bin/spr_launch.ps1"
 	var args_res := "user://bin/spr-args.json"
-	var pid_res := "user://bin/spr-launch.pid"
+	var pid_res := PID_RES
+	var ready_res := READY_RES
 	if not _write_text(script_res, LAUNCH_PS1.strip_edges() + "\n"):
-		return OS.create_process(exe, args, false)
+		return OS.create_process(run_exe, run_args, false)
 	var payload: Array = []
-	for a in args:
+	for a in run_args:
 		payload.append(a)
 	if not _write_text(args_res, JSON.stringify(payload)):
-		return OS.create_process(exe, args, false)
+		return OS.create_process(run_exe, run_args, false)
 	if FileAccess.file_exists(pid_res):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(pid_res))
+	if FileAccess.file_exists(ready_res):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(ready_res))
 	var script_abs := ProjectSettings.globalize_path(script_res).replace("/", "\\")
-	var exe_abs := exe.replace("/", "\\")
+	var exe_abs := run_exe.replace("/", "\\")
 	var cwd := (work_dir if not work_dir.is_empty() else exe.get_base_dir()).replace("/", "\\")
 	var pid_abs := ProjectSettings.globalize_path(pid_res).replace("/", "\\")
 	var args_abs := ProjectSettings.globalize_path(args_res).replace("/", "\\")
-	var helper := OS.create_process("powershell.exe", PackedStringArray([
+	var ready_abs := ProjectSettings.globalize_path(ready_res).replace("/", "\\")
+	var hide := run_exe.get_file().to_lower().find("oldcpusimulator") >= 0
+	var ps := PackedStringArray([
 		"-NoProfile",
 		"-STA",
 		"-ExecutionPolicy",
@@ -256,17 +369,30 @@ static func launch_shown(exe: String, args: PackedStringArray, work_dir: String 
 		pid_abs,
 		"-ArgFile",
 		args_abs,
+		"-ReadyFile",
+		ready_abs,
 		"-RaiseMs",
-		"8000",
-	]), false)
+		"12000",
+	])
+	if hide:
+		ps.append("-HideHost")
+	var helper := OS.create_process("powershell.exe", ps, false)
 	if helper == -1:
-		return OS.create_process(exe, args, false)
-	for _i in 40:
-		OS.delay_msec(50)
+		return OS.create_process(run_exe, run_args, false)
+	for _i in 12:
+		OS.delay_msec(25)
 		var pid := _read_pid_file(pid_res)
 		if pid > 0:
 			return pid
-	return OS.create_process(exe, args, false)
+	return helper if helper > 0 else OS.create_process(run_exe, run_args, false)
+
+
+static func launch_pid() -> int:
+	return _read_pid_file(PID_RES)
+
+
+static func player_ready() -> bool:
+	return FileAccess.file_exists(READY_RES)
 
 
 static func _read_pid_file(path: String) -> int:
