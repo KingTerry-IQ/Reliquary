@@ -113,6 +113,17 @@ static func cpu_mhz(launch: String) -> int:
 	return 0
 
 
+## OldCPUSimulator `-sw ..\Flash\flashplayer_32_sa.exe`: the player it wraps.
+static func sw_exe(launch: String) -> String:
+	var t := tokens(launch)
+	var i := 0
+	while i < t.size():
+		if (t[i] == "-sw" or t[i] == "--start-with") and i + 1 < t.size():
+			return str(t[i + 1]).strip_edges()
+		i += 1
+	return ""
+
+
 ## Curation `-t` wins. Authentic mode otherwise picks an era clock from releaseDate.
 static func era_mhz(entry: Dictionary, launch: String = "", authentic: bool = true) -> int:
 	var cmd := launch.strip_edges()

@@ -68,6 +68,13 @@ static func uses_fp_url_rewrite(template: String) -> bool:
 	return template.to_lower() == "shiva3d"
 
 
+## ShiVa rewrites archived URLs onto the plugin port; everything else Navigator
+## runs reaches us through Flashpoint's proxy port instead.
+static func wants_plugin_port(entry: Dictionary) -> bool:
+	var inv := secureplayer_invocation(entry, "x", "y")
+	return inv.size() > 0 and uses_fp_url_rewrite(str(inv[0]))
+
+
 ## FlashpointSecurePlayer template + URL. Bats unwrap to this.
 static func secureplayer_invocation(
 	entry: Dictionary,
@@ -147,6 +154,10 @@ static func pack_id_for(entry: Dictionary) -> String:
 		return "supportpack-viscape"
 	if plat.find("vrml") >= 0 or app.find("startcosmo") >= 0:
 		return "supportpack-vrml"
+	## Navigator plays these in-page, so it needs the NPAPI plugin the Flash
+	## pack carries — not just the browser.
+	if plat.find("flash") >= 0 or Flash.is_projector(app):
+		return "supportpack-flash"
 	if app.find("netscape") >= 0:
 		return "supportpack-common-netscape"
 	if app.find("secureplayer") >= 0:
@@ -281,10 +292,96 @@ func configure_proxy(port: int) -> bool:
 		root.path_join("browser").path_join("defaults").path_join("profile"),
 		ProjectSettings.globalize_path("user://bin/nav-profile"),
 	]
+	profiles.append_array(live_profile_dirs(root))
 	for p in profiles:
 		DirAccess.make_dir_recursive_absolute(p)
 		_write_text(p.path_join("user.js"), user)
+	## The portable launcher rewrites user.js on every start and ships a
+	## prefs.js already pinned to Flashpoint's own proxy port, so the profile
+	## Navigator really loads has to be corrected in prefs.js too.
+	for p in live_profile_dirs(root):
+		_patch_prefs(p.path_join("prefs.js"), port)
 	return true
+
+
+## FPNavigator is an X-Launcher portable build: its real profile is
+## User/<AppName>/Profiles/<Profile>, named by FPNavigator.ini — not any of the
+## conventional Firefox locations.
+static func live_profile_dirs(root: String) -> PackedStringArray:
+	var out := PackedStringArray()
+	var app_name := ""
+	var profile := ""
+	var ini := root.path_join("FPNavigator.ini")
+	if FileAccess.file_exists(ini):
+		var f := FileAccess.open(ini, FileAccess.READ)
+		if f != null:
+			while not f.eof_reached():
+				var line := f.get_line().strip_edges()
+				if line.to_lower().begins_with("appname="):
+					app_name = line.substr(8).strip_edges()
+				elif line.to_lower().begins_with("profile="):
+					profile = line.substr(8).strip_edges()
+			f.close()
+	if not app_name.is_empty() and not profile.is_empty():
+		var named := root.path_join("User").path_join(app_name).path_join("Profiles").path_join(profile)
+		if DirAccess.dir_exists_absolute(named):
+			out.append(named)
+	## Whatever the ini says, take any profile that already holds a prefs.js.
+	for found in _find_all(root.path_join("User"), "prefs.js"):
+		var dir := found.get_base_dir()
+		if not out.has(dir):
+			out.append(dir)
+	return out
+
+
+## Replace the proxy block, leaving every other preference as the pack set it.
+static func _patch_prefs(path: String, port: int) -> bool:
+	if not FileAccess.file_exists(path):
+		return false
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return false
+	var kept: PackedStringArray = []
+	while not f.eof_reached():
+		var line := f.get_line()
+		if line.strip_edges().begins_with("user_pref(\"network.proxy."):
+			continue
+		kept.append(line)
+	f.close()
+	kept.append("user_pref(\"network.proxy.type\", 1);")
+	for scheme in ["http", "ssl", "ftp"]:
+		kept.append("user_pref(\"network.proxy.%s\", \"127.0.0.1\");" % scheme)
+		kept.append("user_pref(\"network.proxy.%s_port\", %d);" % [scheme, port])
+	kept.append("user_pref(\"network.proxy.share_proxy_settings\", true);")
+	kept.append("user_pref(\"network.proxy.no_proxies_on\", \"\");")
+	var out := FileAccess.open(path, FileAccess.WRITE)
+	if out == null:
+		return false
+	out.store_string("\n".join(kept).strip_edges() + "\n")
+	out.close()
+	return true
+
+
+static func _find_all(dir: String, filename: String) -> PackedStringArray:
+	var out := PackedStringArray()
+	var want := filename.to_lower()
+	var d := DirAccess.open(dir)
+	if d == null:
+		return out
+	d.list_dir_begin()
+	var fname := d.get_next()
+	var subs: PackedStringArray = []
+	while fname != "":
+		var full := dir.path_join(fname)
+		if d.current_is_dir() and not fname.begins_with("."):
+			subs.append(full)
+		elif fname.to_lower() == want:
+			out.append(full)
+		fname = d.get_next()
+	d.list_dir_end()
+	for s in subs:
+		out.append_array(_find_all(s, filename))
+	return out
 
 
 func play_url(movie: String, throttle_mhz: int = 0) -> int:

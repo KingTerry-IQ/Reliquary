@@ -8,8 +8,14 @@ const SPR_PORT := 22500
 ## ShiVa SecurePlayer rewrites http://host to http://localhost:22600/host
 const PLUGIN_PORT := 22600
 
+const HIT_LOG_MAX := 400
+
 var port: int = 0
 var last_path: String = ""
+## What the player actually asked us for. The soak harness reads these to tell
+## "the runtime opened the movie" from "the runtime opened and sat there".
+var hits: PackedStringArray = []
+var misses: PackedStringArray = []
 var _server := TCPServer.new()
 var _root: String = ""
 var _remote: String = ""
@@ -32,6 +38,8 @@ func serve(
 	_ruffle_web = ProjectSettings.globalize_path(ruffle_web) if not ruffle_web.is_empty() else ""
 	_rewrite_hosts = rewrite_hosts
 	_last_ok_dir = ""
+	hits = PackedStringArray()
+	misses = PackedStringArray()
 	for p in range(prefer, prefer + 30):
 		if _server.listen(p, "127.0.0.1") == OK:
 			port = p
@@ -289,11 +297,13 @@ func _serve_peer(peer: StreamPeerTCP) -> void:
 		if not policy.is_empty():
 			_reply(peer, 200, "text/xml", policy.to_utf8_buffer(), method == "HEAD", text)
 			return
+		_note(misses, path)
 		_reply(peer, 404, "text/plain", "not found".to_utf8_buffer(), method == "HEAD", text)
 		return
+	_note(hits, path)
 	_last_ok_dir = full.get_base_dir()
 	var body := FileAccess.get_file_as_bytes(full)
-	var mime := _mime(full)
+	var mime := mime_for_body(full, body)
 	if mime.begins_with("text/html"):
 		var html := body.get_string_from_utf8()
 		if _rewrite_hosts:
@@ -303,6 +313,18 @@ func _serve_peer(peer: StreamPeerTCP) -> void:
 			html = inject_ruffle_html(html)
 		body = html.to_utf8_buffer()
 	_reply(peer, 200, mime, body, method == "HEAD", text, FileAccess.get_modified_time(full))
+
+
+static func _note(into: PackedStringArray, path: String) -> void:
+	if path.is_empty() or into.has(path):
+		return
+	if into.size() >= HIT_LOG_MAX:
+		return
+	into.append(path)
+
+
+func served(path: String) -> bool:
+	return hits.has(path)
 
 
 ## Request-line target (METHOD may be followed by a URL that contains spaces).
@@ -431,10 +453,30 @@ static func alt_rels(path: String) -> PackedStringArray:
 	return out
 
 
+## html/htm first, the way Flashpoint's router orders them, then the server-page
+## names an archived site kept as its directory index.
+const INDEX_NAMES: PackedStringArray = [
+	"index.html",
+	"index.htm",
+	"default.html",
+	"default.htm",
+	"index.php",
+	"index.php5",
+	"index.phtml",
+	"index.jsp",
+	"index.asp",
+	"index.aspx",
+	"index.shtml",
+	"index.cgi",
+	"default.asp",
+	"default.aspx",
+]
+
+
 static func index_file(dir: String) -> String:
 	if dir.is_empty() or not DirAccess.dir_exists_absolute(dir):
 		return ""
-	for n in ["index.html", "index.htm", "default.html", "default.htm"]:
+	for n in INDEX_NAMES:
 		var p := dir.path_join(n)
 		if FileAccess.file_exists(p):
 			return p
@@ -641,6 +683,76 @@ static func mime_for(path: String) -> String:
 
 func _mime(path: String) -> String:
 	return _mime_of(path)
+
+
+## Archived launch targets are often a page with no extension (`/2048`) or a
+## server-page one (`index.jsp`). Flashpoint's router calls both
+## application/octet-stream and leans on Navigator to render them regardless;
+## Chromium downloads them instead. So when the name tells us nothing, read the
+## first bytes and say what the file actually is.
+static func mime_for_body(path: String, body: PackedByteArray) -> String:
+	var named := _mime_of(path)
+	if named != "application/octet-stream":
+		return named
+	var sniffed := sniff_mime(body)
+	return sniffed if not sniffed.is_empty() else named
+
+
+const HTML_OPENERS: PackedStringArray = [
+	"<!doctype html",
+	"<html",
+	"<head",
+	"<body",
+	"<frameset",
+	"<title",
+	"<meta",
+	"<script",
+]
+
+
+static func sniff_mime(body: PackedByteArray) -> String:
+	if body.size() < 4:
+		return ""
+	if body[0] == 0x89 and body[1] == 0x50 and body[2] == 0x4E and body[3] == 0x47:
+		return "image/png"
+	if body[0] == 0x47 and body[1] == 0x49 and body[2] == 0x46:
+		return "image/gif"
+	if body[0] == 0xFF and body[1] == 0xD8 and body[2] == 0xFF:
+		return "image/jpeg"
+	var tag := PackedByteArray([body[0], body[1], body[2]]).get_string_from_ascii()
+	if (tag == "FWS" or tag == "CWS" or tag == "ZWS") and body[3] < 64:
+		return "application/x-shockwave-flash"
+	if _looks_like_html(body):
+		return "text/html"
+	return ""
+
+
+## Leading whitespace, a BOM and an HTML comment or doctype all come before the
+## first real tag, so skip past them before deciding.
+static func _looks_like_html(body: PackedByteArray) -> bool:
+	var head := body.slice(0, mini(body.size(), 1024))
+	var text := head.get_string_from_utf8()
+	if text.is_empty():
+		text = head.get_string_from_ascii()
+	text = text.strip_edges().lstrip("﻿").strip_edges().to_lower()
+	if text.is_empty():
+		return false
+	if text.begins_with("<?php") or text.begins_with("<%"):
+		return true
+	while text.begins_with("<!--"):
+		var end := text.find("-->")
+		if end < 0:
+			return false
+		text = text.substr(end + 3).strip_edges()
+	if text.begins_with("<?xml"):
+		var gt := text.find("?>")
+		if gt < 0:
+			return false
+		text = text.substr(gt + 2).strip_edges()
+	for opener in HTML_OPENERS:
+		if text.begins_with(opener):
+			return true
+	return false
 
 
 static func _mime_of(path: String) -> String:

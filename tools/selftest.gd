@@ -215,6 +215,11 @@ func _run() -> void:
 		Unzip.path_from_launch("http://example.com/game.swf#zoom") == "example.com/game.swf"
 	)
 	_check_launch_resolve()
+	_check_flash_runtime()
+	_check_tag_filter()
+	_check_mime_sniffing()
+	_check_navigator_proxy()
+	_check_favorites()
 	_check(
 		"inscribed launch field still ruffles",
 		Flashpoint.uses_ruffle({"platform": "Flash", "launch": "http://x/a.swf"})
@@ -751,6 +756,50 @@ func _run() -> void:
 		"stage developer click switches to All Games",
 		main._playlist_id == "all"
 	)
+
+	## A filter belongs to the list it was typed against.
+	main._sel_dev = "Tom Fulp"
+	main._sel_pub = "Newgrounds"
+	main._sel_series = "Pico"
+	main._sel_tag = "Arcade"
+	main._search.text = "Bowman"
+	main._browse_letter = "B"
+	if main._playlist != null and main._playlist.item_count > 1:
+		main._playlist.select(1)
+		main._on_playlist_selected(1)
+	_check(
+		"collection switch clears the search",
+		main._search.text.is_empty() and main._browse_letter.is_empty()
+	)
+	_check(
+		"collection switch clears the facets",
+		main._sel_dev.is_empty()
+		and main._sel_pub.is_empty()
+		and main._sel_series.is_empty()
+		and main._sel_tag.is_empty()
+	)
+	main._select_playlist("all")
+
+	## Marking a favourite must not move the browse out from under the operator.
+	var star_rows: Array = []
+	for n in 5:
+		star_rows.append({"id": "selftest-star-%d" % n, "title": "Star %d" % n})
+	main._archive.clear()
+	for entry: Variant in star_rows:
+		var rec: Dictionary = entry
+		var at: int = main._archive.add_item(main._archive_label(rec))
+		main._archive.set_item_metadata(at, rec)
+	main._archive.select(3)
+	_check("archive row reports the selection", main._archive_row() == 3)
+	## Marked in memory only — the selftest never touches the saved index.
+	main.favorites.entries["selftest-star-3"] = {"id": "selftest-star-3"}
+	main._repaint_archive_row("selftest-star-3")
+	_check("favourite stars the row it was pressed on", main._archive.get_item_text(3).begins_with("★"))
+	_check("favourite leaves the other rows alone", not main._archive.get_item_text(0).begins_with("★"))
+	_check("favourite keeps the row selected", main._archive_row() == 3)
+	_check("favourite keeps the list as it was", main._archive.item_count == 5)
+	main.favorites.entries.erase("selftest-star-3")
+
 	main.free()
 
 	var pick := FacetPick.new()
@@ -841,6 +890,406 @@ func _check_launch_resolve() -> void:
 		)
 		.replace("\\", "/")
 		.ends_with("/spynet/sound_level_1.cct")
+	)
+
+
+## Flashpoint runs Flash in the projector its applicationPath names. We have to
+## pick the same one, or we are not running the archive the way it was curated.
+func _check_flash_runtime() -> void:
+	var plain := {
+		"platform": "Flash",
+		"applicationPath": "FPSoftware\\Flash\\flashplayer_32_sa.exe",
+		"launchCommand": "http://www.andkon.com/arcade/sport/bowman/bowman.swf",
+	}
+	_check("default Flash entry uses the projector", Flash.projector_entry(plain))
+	_check("default projector is Flash 32", Flash.projector_name(plain) == "flashplayer_32_sa.exe")
+
+	var pinned := {
+		"platform": "Flash",
+		"applicationPath": "FPSoftware\\Flash\\flashplayer9r277_win_sa.exe",
+		"launchCommand": "http://example.com/old.swf",
+	}
+	_check(
+		"a pinned projector is honoured, not replaced by Flash 32",
+		Flash.projector_name(pinned) == "flashplayer9r277_win_sa.exe"
+	)
+
+	var versioned := {
+		"platform": "Flash",
+		"applicationPath": "FPSoftware\\Flash\\8r22\\SAFlashPlayer.exe",
+		"launchCommand": "http://example.com/old.swf",
+	}
+	_check(
+		"a versioned projector folder maps onto the pack's filename",
+		Flash.projector_name(versioned) == "SAFlashPlayer_8r22.exe"
+	)
+
+	var throttled := {
+		"platform": "Flash",
+		"applicationPath": "FPSoftware\\OldCPUSimulator\\OldCPUSimulator.exe",
+		"launchCommand": "-t 65 -sw ..\\Flash\\flashplayer_32_sa.exe http://example.com/slow.swf",
+	}
+	_check("OldCPUSimulator entries still play in the projector", Flash.projector_entry(throttled))
+	_check(
+		"the projector comes from -sw, not from OldCPUSimulator",
+		Flash.projector_name(throttled) == "flashplayer_32_sa.exe"
+	)
+	_check("-sw target is read off the launch command", Unzip.sw_exe(
+		"-t 65 -sw ..\\Flash\\flashplayer_32_sa.exe http://example.com/slow.swf"
+	) == "..\\Flash\\flashplayer_32_sa.exe")
+	_check("curation -t still wins the clock", Unzip.cpu_mhz(
+		"-t 65 -sw ..\\Flash\\flashplayer_32_sa.exe http://example.com/slow.swf"
+	) == 65)
+	_check(
+		"the movie URL survives the OldCPUSimulator prefix",
+		Unzip.movie_url("-t 65 -sw ..\\Flash\\flashplayer_32_sa.exe http://example.com/slow.swf")
+		== "http://example.com/slow.swf"
+	)
+
+	var in_page := {
+		"platform": "Flash",
+		"applicationPath": "FPSoftware\\fpnavigator-portable\\FPNavigator.exe",
+		"launchCommand": "http://example.com/game.html",
+	}
+	_check("browser-embedded Flash stays out of the projector", not Flash.projector_entry(in_page))
+	_check("browser-embedded Flash goes to Navigator", FlashpointHost.needs_flashpoint(in_page))
+	_check("Navigator gets the Flash plugin pack", Packs.pack_id_for(in_page) == "supportpack-flash")
+
+	## Flashpoint opens every FPNavigator entry in Navigator, HTML5 included.
+	var html5 := {
+		"platform": "HTML5",
+		"applicationPath": "FPSoftware\\fpnavigator-portable\\FPNavigator.exe",
+		"launchCommand": "http://example.com/game.html",
+	}
+	_check("HTML5 on Navigator goes to Navigator", FlashpointHost.needs_flashpoint(html5))
+	_check("HTML5 on Navigator needs no Flash plugin", Packs.pack_id_for(html5) == "supportpack-common-fpnavigator")
+	_check("an HTML5 page is browser-renderable", FlashpointHost.page_entry(html5))
+	_check("Flash in a page is browser-renderable", FlashpointHost.page_entry(in_page))
+
+	## …but a plugin entry has no browser alternative, so the toggle must not
+	## be allowed to divert it.
+	var unity := {
+		"platform": "Unity",
+		"applicationPath": "FPSoftware\\startUnity.bat",
+		"launchCommand": "5.x http://example.com/game.unity3d",
+	}
+	_check("Unity still needs Flashpoint", FlashpointHost.needs_flashpoint(unity))
+	_check("Unity is not browser-renderable", not FlashpointHost.page_entry(unity))
+	_check("Unity is not a page despite the html launch", not FlashpointHost.page_entry({
+		"platform": "Silverlight",
+		"applicationPath": "FPSoftware\\fpnavigator-portable\\FPNavigator.exe",
+		"launchCommand": "http://example.com/game.xap",
+	}))
+
+	## An entry with no applicationPath is unchanged: still our own page path.
+	var bare_html5 := {"platform": "HTML5", "launchCommand": "http://example.com/index.html"}
+	_check("a plain HTML5 row stays on the local page path", not FlashpointHost.needs_flashpoint(bare_html5))
+	_check("a plain HTML5 row is still a browser entry", Flashpoint.uses_browser(bare_html5))
+
+	## "FlashpointSecurePlayer" starts with "Flashp", not "FlashPla" — the
+	## projector test has to stay narrow enough to tell them apart.
+	var secure := {
+		"platform": "3D Groove GX",
+		"applicationPath": "FPSoftware\\FlashpointSecurePlayer.exe",
+		"launchCommand": "3dgroovegx http://example.com/game.gx",
+	}
+	_check(
+		"Secure Player entries are not mistaken for Flash",
+		Packs.pack_id_for(secure) == "supportpack-common-secureplayer"
+	)
+	_check("Secure Player is not a projector", not Flash.projector_entry(secure))
+
+	var shockwave := {
+		"platform": "Shockwave",
+		"applicationPath": "FPSoftware\\Shockwave\\PJ101\\SPR.exe",
+		"launchCommand": "http://example.com/movie.dcr",
+	}
+	_check("Shockwave never reaches the Flash projector", not Flash.projector_entry(shockwave))
+
+	var root := "user://selftest_flash"
+	_write_probe(root.path_join("content/www.example.com/files/game.swf"))
+	_check(
+		"the projector is handed the archived URL, not a file path",
+		Flash.movie_for(root, "http://www.example.com/files/game.swf")
+		== "http://www.example.com/files/game.swf"
+	)
+	_check(
+		"flashvars in the launch query survive",
+		Flash.movie_for(root, "http://www.example.com/files/game.swf?lang=fr")
+		== "http://www.example.com/files/game.swf?lang=fr"
+	)
+	_check(
+		"our proxy maps that URL back onto the extract",
+		LocalHttp.target_path("GET http://www.example.com/files/game.swf HTTP/1.1\r\n\r\n")
+		== "www.example.com/files/game.swf"
+	)
+
+
+## Flashpoint's tag filters decide what the archive pane lists. Off by default
+## except the group Flashpoint itself ships enabled.
+func _check_tag_filter() -> void:
+	var tf := TagFilter.new()
+	_check("ships Flashpoint's seven groups", tf.groups.size() == 7)
+	_check("extreme is hidden out of the box", not tf.show_extreme)
+	_check("filtering is on out of the box", tf.is_filtering())
+
+	var porn := {"title": "x", "tags": ["Hentai", "Anime"]}
+	var gore := {"title": "x", "tags": ["Gore"]}
+	var plain := {"title": "x", "tags": ["Arcade", "Platformer"]}
+	var beast := {"title": "x", "tags": ["Bestiality"]}
+	_check("extreme groups hide while SHOW EXTREME is off", tf.blocks(porn))
+	_check("violence is extreme too", tf.blocks(gore))
+	_check("ordinary entries are untouched", not tf.blocks(plain))
+	_check("the group Flashpoint ships enabled hides", tf.blocks(beast))
+
+	tf.set_show_extreme(true)
+	_check("SHOW EXTREME reveals the extreme groups", not tf.blocks(porn))
+	_check(
+		"the enabled group still hides with SHOW EXTREME on",
+		tf.blocks(beast)
+	)
+	_check("ordinary entries stay visible either way", not tf.blocks(plain))
+
+	tf.set_enabled("Pornography Extreme", false)
+	_check("nothing hides once every group is off", not tf.is_filtering())
+	_check("apply is a no-op when nothing is on", not tf.blocks(beast))
+	var rows: Array = [porn, gore, plain, beast]
+	_check("apply returns the rows untouched", tf.apply(rows).size() == 4)
+
+	tf.set_show_extreme(false)
+	_check("apply drops exactly the blocked rows", tf.apply(rows).size() == 1)
+	_check(
+		"the survivor is the ordinary entry",
+		str((tf.apply(rows)[0] as Dictionary).get("tags", [])).find("Arcade") >= 0
+	)
+
+	## A catalog cached before tags were a list stores them joined.
+	var joined := {"title": "x", "tags": "Arcade; Hentai"}
+	_check("joined tag strings are read too", tf.blocks(joined))
+	_check("tag matching ignores case", tf.blocks({"tags": ["hEnTaI"]}))
+	_check("an untagged row is never blocked", not tf.blocks({"title": "x"}))
+
+	var names := tf.active_names()
+	_check("active groups are nameable for the chip", names.size() >= 4)
+
+	## Round-trip the operator's choices the way the config file does.
+	tf.set_enabled("Otherwise Mature Topics", true)
+	var saved := tf.to_config()
+	var fresh := TagFilter.new()
+	fresh.from_config(saved)
+	_check(
+		"saved groups come back on",
+		fresh.blocks({"tags": ["Suicide"]})
+	)
+	_check("saved SHOW EXTREME comes back", fresh.show_extreme == tf.show_extreme)
+	var default_fresh := TagFilter.new()
+	_check(
+		"mature topics are not hidden by default",
+		not default_fresh.blocks({"tags": ["Suicide"]})
+	)
+	tf.free()
+	fresh.free()
+	default_fresh.free()
+
+
+## Favourites are a local bookmark, not an inscription: free, off-chain, and
+## still listable when the archive cannot be reached.
+func _check_favorites() -> void:
+	if FileAccess.file_exists(Favorites.INDEX_PATH):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(Favorites.INDEX_PATH))
+	var fav := Favorites.new()
+	fav.load_index()
+	_check("a fresh shelf is empty", fav.size() == 0)
+
+	var game := {
+		"id": "abc-123",
+		"title": "Bowman",
+		"platform": "Flash",
+		"launchCommand": "http://www.andkon.com/arcade/sport/bowman/bowman.swf",
+		"applicationPath": "FPSoftware\\Flash\\flashplayer_32_sa.exe",
+		"zipped": true,
+		"screenshotUrlThatShouldNotBeKept": "x",
+	}
+	_check("marking returns the new state", fav.toggle(game))
+	_check("the title is now a favourite", fav.has(game))
+	_check("and is findable by id", fav.has_id("abc-123"))
+	_check("one favourite is held", fav.size() == 1)
+	_check("unmarking returns the new state", not fav.toggle(game))
+	_check("the title is no longer a favourite", not fav.has(game))
+	_check("the shelf is empty again", fav.size() == 0)
+
+	## Only what listing and launching need is kept.
+	var slim := Favorites.slim(game)
+	_check("the launch command is kept", str(slim.get("launchCommand", "")).find("bowman.swf") >= 0)
+	_check("the projector is kept", slim.has("applicationPath"))
+	_check("unknown fields are dropped", not slim.has("screenshotUrlThatShouldNotBeKept"))
+
+	## A row with no id cannot be a favourite — nothing could resolve it later.
+	_check("an id-less row is refused", not fav.add({"title": "nameless"}))
+	_check("refusing it changed nothing", fav.size() == 0)
+
+	## Survives a restart.
+	fav.add(game)
+	fav.add({"id": "def-456", "title": "Samorost", "platform": "Flash"})
+	var reopened := Favorites.new()
+	reopened.load_index()
+	_check("favourites survive a restart", reopened.size() == 2)
+	_check("and keep their identity", reopened.has_id("abc-123") and reopened.has_id("def-456"))
+	_check("rows come back as records", reopened.rows().size() == 2)
+
+	## The live catalog row wins; the saved copy is only a fallback.
+	var fresh := {"id": "abc-123", "title": "Bowman (rescanned)", "platform": "Flash"}
+	var merged := reopened.rows_merged([fresh])
+	var found := ""
+	for entry: Variant in merged:
+		if str((entry as Dictionary).get("id", "")) == "abc-123":
+			found = str((entry as Dictionary).get("title", ""))
+	_check("the catalog row is preferred when present", found == "Bowman (rescanned)")
+	_check("titles absent from the catalog still list", merged.size() == 2)
+	_check("with no catalog at all, the saved rows list", reopened.rows_merged([]).size() == 2)
+
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(Favorites.INDEX_PATH))
+
+
+## Navigator ships pointed at Flashpoint's proxy port and keeps its real
+## profile somewhere no Firefox convention would look. Getting either wrong
+## means every page entry dies on "the proxy server is refusing connections".
+func _check_navigator_proxy() -> void:
+	var nav := {
+		"platform": "HTML5",
+		"applicationPath": "FPSoftware\\fpnavigator-portable\\FPNavigator.exe",
+		"launchCommand": "http://example.com/game.html",
+	}
+	var shiva := {
+		"platform": "ShiVa3D",
+		"applicationPath": "FPSoftware\\FlashpointSecurePlayer.exe",
+		"launchCommand": "shiva3d http://example.com/game.swf",
+	}
+	_check("Navigator entries use the proxy port", not Packs.wants_plugin_port(nav))
+	_check("ShiVa entries use the plugin port", Packs.wants_plugin_port(shiva))
+	_check("the proxy port is Flashpoint's own", LocalHttp.SPR_PORT == 22500)
+	_check("the plugin port is Flashpoint's own", LocalHttp.PLUGIN_PORT == 22600)
+
+	## The X-Launcher layout: User/<AppName>/Profiles/<Profile>.
+	var root := ProjectSettings.globalize_path("user://selftest_nav")
+	var prof := root.path_join("User/flashpointnavigator/Profiles/Default")
+	DirAccess.make_dir_recursive_absolute(prof)
+	_write_probe("user://selftest_nav/User/flashpointnavigator/Profiles/Default/prefs.js")
+	var ini := FileAccess.open(root.path_join("FPNavigator.ini"), FileAccess.WRITE)
+	if ini != null:
+		ini.store_string("[Setup]\nAppName=flashpointnavigator\nProfile=Default\n")
+		ini.close()
+	var found := Packs.live_profile_dirs(root)
+	_check(
+		"the real profile is found from FPNavigator.ini",
+		found.size() > 0 and str(found[0]).replace("\\", "/").ends_with("Profiles/Default")
+	)
+
+	## prefs.js already pins Flashpoint's port, so our port has to replace it.
+	var pj := prof.path_join("prefs.js")
+	var f := FileAccess.open(pj, FileAccess.WRITE)
+	if f != null:
+		f.store_string(
+			"user_pref(\"browser.cache.disk.parent_directory\", \"x\");\n"
+			+ "user_pref(\"network.proxy.http_port\", 22500);\n"
+			+ "user_pref(\"network.proxy.type\", 1);\n"
+		)
+		f.close()
+	_check("prefs.js is patched", Packs._patch_prefs(pj, 24680))
+	var text := FileAccess.get_file_as_string(pj)
+	_check("the new port replaces the shipped one", text.find("24680") >= 0)
+	_check("the shipped port is gone", text.find("22500") < 0)
+	_check("unrelated preferences survive", text.find("browser.cache.disk.parent_directory") >= 0)
+	_check("the proxy stays enabled", text.find("\"network.proxy.type\", 1") >= 0)
+
+
+## Archived pages often have no extension or a server-page one. Handing those
+## to a browser as octet-stream makes it download the game instead of playing it.
+func _check_mime_sniffing() -> void:
+	var page := "<!DOCTYPE html>\n<html><head><title>x</title></head></html>".to_utf8_buffer()
+	var bare := "<html><body>hi</body></html>".to_utf8_buffer()
+	_check(
+		"an extensionless page is served as HTML",
+		LocalHttp.mime_for_body("/web3-arcade.herokuapp.com/2048", page) == "text/html"
+	)
+	_check(
+		"a .jsp page is served as HTML",
+		LocalHttp.mime_for_body("/arcane2/arcane/index.jsp", page) == "text/html"
+	)
+	_check(
+		"a .php page is served as HTML",
+		LocalHttp.mime_for_body("/x/game.php", bare) == "text/html"
+	)
+	_check(
+		"the old behaviour was octet-stream",
+		LocalHttp.mime_for("/arcane2/arcane/index.jsp") == "application/octet-stream"
+	)
+
+	## A name we do know always wins: never let a sniff relabel a known type.
+	_check(
+		"a known extension is not overridden",
+		LocalHttp.mime_for_body("/x/style.css", page) == "text/css"
+	)
+	_check(
+		"swf stays swf",
+		LocalHttp.mime_for_body("/x/game.swf", "FWS\u0006junk".to_utf8_buffer())
+		== "application/x-shockwave-flash"
+	)
+
+	## Binary without a useful name still gets identified where we can.
+	var png := PackedByteArray([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+	var gif := "GIF89a".to_utf8_buffer()
+	var swf := PackedByteArray([0x46, 0x57, 0x53, 0x06, 0x00, 0x00])
+	_check("png magic is recognised", LocalHttp.mime_for_body("/x/blob", png) == "image/png")
+	_check("gif magic is recognised", LocalHttp.mime_for_body("/x/blob", gif) == "image/gif")
+	_check(
+		"swf magic is recognised",
+		LocalHttp.mime_for_body("/x/blob", swf) == "application/x-shockwave-flash"
+	)
+	_check(
+		"unknown binary stays octet-stream",
+		LocalHttp.mime_for_body("/x/blob", PackedByteArray([1, 2, 3, 4, 5, 6]))
+		== "application/octet-stream"
+	)
+	_check("an empty file stays octet-stream", LocalHttp.mime_for_body("/x/blob", PackedByteArray()) == "application/octet-stream")
+
+	## Real captures rarely start at the first tag.
+	_check(
+		"leading whitespace does not hide the page",
+		LocalHttp.mime_for_body("/x/p", "\n\n   <html></html>".to_utf8_buffer()) == "text/html"
+	)
+	_check(
+		"a leading comment does not hide the page",
+		LocalHttp.mime_for_body("/x/p", "<!-- saved from url -->\n<html></html>".to_utf8_buffer())
+		== "text/html"
+	)
+	_check(
+		"an xml prolog does not hide xhtml",
+		LocalHttp.mime_for_body("/x/p", "<?xml version=\"1.0\"?><html></html>".to_utf8_buffer())
+		== "text/html"
+	)
+	_check(
+		"plain text is not mistaken for a page",
+		LocalHttp.mime_for_body("/x/p", "just some notes".to_utf8_buffer())
+		== "application/octet-stream"
+	)
+
+	## Directory index has to find the server-page names too.
+	var idir := "user://selftest_index"
+	_write_probe(idir.path_join("only-jsp/index.jsp"))
+	_write_probe(idir.path_join("both/index.html"))
+	_write_probe(idir.path_join("both/index.php"))
+	_check(
+		"index.jsp is a directory index",
+		LocalHttp.index_file(ProjectSettings.globalize_path(idir.path_join("only-jsp")))
+		.replace("\\", "/")
+		.ends_with("/index.jsp")
+	)
+	_check(
+		"index.html still wins over index.php",
+		LocalHttp.index_file(ProjectSettings.globalize_path(idir.path_join("both")))
+		.replace("\\", "/")
+		.ends_with("/index.html")
 	)
 
 

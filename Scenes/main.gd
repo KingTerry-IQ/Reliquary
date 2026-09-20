@@ -4,6 +4,9 @@ const CONFIG_PATH := "user://flash.cfg"
 const APP_NAME := "Reliquary"
 const INSCRIBE_GUIDE := "This game stays permanently accessible."
 const MISSING_RUNTIME := "MISSING RUNTIME"
+## The operator's own collection, alongside Flashpoint's curated playlists.
+const FAVORITES_ID := "favorites"
+const FAVORITES_TITLE := "★ Favourites"
 const PAGE_SIZE := 400
 const CABINET_PAGE := 80
 const GENRES: PackedStringArray = [
@@ -27,11 +30,14 @@ const GENRES: PackedStringArray = [
 
 var iq: IQClient
 var ruffle: Ruffle
+var flash: Flash
 var spr: Spr
 var packs: Packs
 var flashpoint: Flashpoint
+var tag_filter := TagFilter.new()
 var cabinet: Cabinet
 var shelf := Shelf.new()
+var favorites := Favorites.new()
 
 var chain: String = "mon"
 var kindled: bool = false
@@ -42,6 +48,9 @@ var _shot_ticket: int = 0
 var _logo_ticket: int = 0
 var _cabinet_logo_ticket: int = 0
 var _archive_hits: Array = []
+## Row the next repaint should land on instead of the top of the page; -1 to
+## let it fall back to the first row, as a fresh search should.
+var _archive_keep_row: int = -1
 var _inscribed: Array = []
 var _inscribed_by_uuid: Dictionary = {}
 
@@ -57,7 +66,8 @@ var _library: OptionButton
 var httpd: LocalHttp
 var fp_host := FlashpointHost.new()
 var _spr_label: Label
-var _nav_label: Label
+var _nav_btn: Button
+var _page_in_navigator: bool = true
 var _letter_bar: VBoxContainer
 var _browse_letter: String = ""
 var _letter_buttons: Dictionary = {}
@@ -133,11 +143,16 @@ var _job: Label
 var _progress: ProgressBar
 var _inscribe_btn: Button
 var _play_btn: Button
+var _fav_btn: Button
 var _drop_btn: Button
 var _search_btn: Button
 var _chain: OptionButton
 var _authentic: bool = true
 var _time_btn: Button
+var _flash_first: bool = true
+var _flash_btn: Button
+var _safe_btn: Button
+var _safe_menu: PopupMenu
 var _player_veil: ColorRect
 var _player_wait_label: Label
 var _player_waiting: bool = false
@@ -147,6 +162,7 @@ func _ready() -> void:
 	theme = TempleTheme.build()
 	_load_config()
 	shelf.load_index()
+	favorites.load_index()
 	_build_ui()
 	var trial_bytes := Cartridge.wipe_trials()
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("user://staging"))
@@ -160,17 +176,25 @@ func _ready() -> void:
 	add_child(iq)
 	ruffle = Ruffle.new()
 	add_child(ruffle)
+	flash = Flash.new()
+	add_child(flash)
 	spr = Spr.new()
 	add_child(spr)
 	packs = Packs.new()
 	add_child(packs)
 	flashpoint = Flashpoint.new()
 	add_child(flashpoint)
+	add_child(tag_filter)
 	httpd = LocalHttp.new()
 	add_child(httpd)
 	cabinet = Cabinet.new(iq, chain)
 
+	## The runtime chips are built before these nodes exist, so they start amber.
+	## Repaint now rather than after the host handshake, which may never land.
+	_refresh_spr_chip()
+
 	iq.host_missing.connect(_on_host_missing)
+	_refresh_tag_filters()
 	_warmup_catalog()
 	_ensure_ruffle()
 	_load_tag_dropdown()
@@ -279,13 +303,38 @@ func _build_topbar() -> Control:
 	_host_label = _status_chip(bar, "HOST  …", TempleTheme.AMBER)
 	_host_label.tooltip_text = "GodOnChain host. Writes need it; cached play does not."
 	_ruffle_label = _status_chip(bar, "RUFFLE  …", TempleTheme.AMBER)
-	_ruffle_label.tooltip_text = "Flash player. Downloaded as the latest stable desktop build."
+	_ruffle_label.tooltip_text = "Ruffle, the fallback Flash player. Latest stable desktop build."
 	_root_label = _status_chip(bar, "ROOT  …", TempleTheme.AMBER)
 	_root_label.tooltip_text = "Operator dbRoot on this chain. Inscribe is refused without it."
 	_spr_label = _status_chip(bar, "SPR  …", TempleTheme.AMBER)
 	_spr_label.tooltip_text = "Shockwave projector, fetched on demand."
-	_nav_label = _status_chip(bar, "NAV  …", TempleTheme.AMBER)
-	_nav_label.tooltip_text = "HTML5 / plugin player (Flashpoint Navigator), fetched on demand."
+	_nav_btn = Button.new()
+	_nav_btn.focus_mode = Control.FOCUS_NONE
+	_nav_btn.custom_minimum_size = Vector2(126, 0)
+	_nav_btn.add_theme_font_size_override("font_size", TempleTheme.SIZE_SMALL)
+	_nav_btn.pressed.connect(_toggle_page_host)
+	bar.add_child(_nav_btn)
+	_refresh_nav_chip()
+	_flash_btn = Button.new()
+	_flash_btn.focus_mode = Control.FOCUS_NONE
+	_flash_btn.custom_minimum_size = Vector2(122, 0)
+	_flash_btn.add_theme_font_size_override("font_size", TempleTheme.SIZE_SMALL)
+	_flash_btn.pressed.connect(_toggle_flash_first)
+	bar.add_child(_flash_btn)
+	_paint_flash_chip()
+
+	_safe_btn = Button.new()
+	_safe_btn.focus_mode = Control.FOCUS_NONE
+	_safe_btn.custom_minimum_size = Vector2(104, 0)
+	_safe_btn.add_theme_font_size_override("font_size", TempleTheme.SIZE_SMALL)
+	_safe_btn.pressed.connect(_open_safe_menu)
+	bar.add_child(_safe_btn)
+	_safe_menu = PopupMenu.new()
+	_safe_menu.hide_on_checkable_item_selection = false
+	_safe_menu.id_pressed.connect(_on_safe_menu)
+	_safe_btn.add_child(_safe_menu)
+	_paint_safe_chip()
+
 	_time_btn = Button.new()
 	_time_btn.focus_mode = Control.FOCUS_NONE
 	_time_btn.custom_minimum_size = Vector2(108, 0)
@@ -326,6 +375,125 @@ func _paint_time_chip() -> void:
 	_time_btn.add_theme_stylebox_override("normal", TempleTheme.chip_box(colour))
 	_time_btn.add_theme_stylebox_override("hover", TempleTheme.chip_box(TempleTheme.WHITE))
 	_time_btn.add_theme_stylebox_override("pressed", TempleTheme.chip_box(TempleTheme.YELLOW))
+
+
+## Flashpoint's default for a Flash entry is the projector its applicationPath
+## names; Ruffle is its secondary player. Match that, but let it be flipped.
+func _paint_flash_chip() -> void:
+	if _flash_btn == null:
+		return
+	var installed := flash != null and flash.has_runtime()
+	var colour := TempleTheme.CYAN
+	if _flash_first:
+		colour = TempleTheme.GREEN if installed else TempleTheme.AMBER
+	_flash_btn.text = "FLASH  PLAYER" if _flash_first else "FLASH  RUFFLE"
+	_flash_btn.tooltip_text = (
+		"Flashpoint's own Flash projector, the way Flashpoint runs it. Click for Ruffle."
+		if _flash_first
+		else "Ruffle, the open reimplementation. Click for Flashpoint's Flash projector."
+	)
+	_flash_btn.add_theme_color_override("font_color", colour)
+	_flash_btn.add_theme_color_override("font_hover_color", TempleTheme.BLACK)
+	_flash_btn.add_theme_color_override("font_pressed_color", TempleTheme.BLACK)
+	_flash_btn.add_theme_stylebox_override("normal", TempleTheme.chip_box(colour))
+	_flash_btn.add_theme_stylebox_override("hover", TempleTheme.chip_box(TempleTheme.WHITE))
+	_flash_btn.add_theme_stylebox_override("pressed", TempleTheme.chip_box(TempleTheme.YELLOW))
+
+
+## Flashpoint's tag filters. SHOW EXTREME is the master switch it ships off;
+## the groups below it are the same seven the launcher lists.
+func _paint_safe_chip() -> void:
+	if _safe_btn == null:
+		return
+	var on := tag_filter.is_filtering()
+	var colour := TempleTheme.GREEN if on else TempleTheme.MUTED
+	_safe_btn.text = "SAFE  ON" if on else "SAFE  OFF"
+	var names := tag_filter.active_names()
+	_safe_btn.tooltip_text = (
+		"Hiding: %s.\nFlashpoint's own tag filters. Tags are crowd-curated, so this is a filter, not a guarantee." % ", ".join(names)
+		if on
+		else "Nothing is hidden. Click to choose Flashpoint's tag filters."
+	)
+	_safe_btn.add_theme_color_override("font_color", colour)
+	_safe_btn.add_theme_color_override("font_hover_color", TempleTheme.BLACK)
+	_safe_btn.add_theme_color_override("font_pressed_color", TempleTheme.BLACK)
+	_safe_btn.add_theme_stylebox_override("normal", TempleTheme.chip_box(colour))
+	_safe_btn.add_theme_stylebox_override("hover", TempleTheme.chip_box(TempleTheme.WHITE))
+	_safe_btn.add_theme_stylebox_override("pressed", TempleTheme.chip_box(TempleTheme.YELLOW))
+
+
+func _open_safe_menu() -> void:
+	if _safe_menu == null:
+		return
+	_safe_menu.clear()
+	_safe_menu.add_check_item("Show extreme entries", 0)
+	_safe_menu.set_item_checked(0, tag_filter.show_extreme)
+	_safe_menu.set_item_tooltip(
+		0, "Flashpoint ships this off. Off hides every group marked extreme."
+	)
+	_safe_menu.add_separator("Also hide")
+	var i := 0
+	for entry: Variant in tag_filter.groups:
+		if not entry is Dictionary:
+			continue
+		var g: Dictionary = entry
+		var name := str(g.get("name", ""))
+		var id := 100 + i
+		i += 1
+		var label := name
+		if bool(g.get("extreme", false)):
+			## Already hidden while SHOW EXTREME is off, but still switchable so
+			## the choice survives turning SHOW EXTREME on.
+			label += "  ·  extreme" if tag_filter.show_extreme else "  ·  extreme (hidden)"
+		_safe_menu.add_check_item(label, id)
+		var idx := _safe_menu.get_item_index(id)
+		_safe_menu.set_item_checked(idx, bool(g.get("enabled", false)))
+		var why := str(g.get("description", ""))
+		if not why.is_empty():
+			_safe_menu.set_item_tooltip(idx, why)
+	var at := _safe_btn.get_screen_position() + Vector2(0, _safe_btn.size.y)
+	_safe_menu.popup(Rect2i(Vector2i(at), Vector2i(320, 0)))
+
+
+func _on_safe_menu(id: int) -> void:
+	if id == 0:
+		tag_filter.set_show_extreme(not tag_filter.show_extreme)
+	else:
+		var i := id - 100
+		if i < 0 or i >= tag_filter.groups.size():
+			return
+		var g: Dictionary = tag_filter.groups[i]
+		tag_filter.set_enabled(str(g.get("name", "")), not bool(g.get("enabled", false)))
+	_paint_safe_chip()
+	_save_config()
+	_open_safe_menu()
+	var names := tag_filter.active_names()
+	_log("Hiding %s." % (", ".join(names) if names.size() > 0 else "nothing"))
+	_reapply_filter()
+
+
+## Take the live tag lists from Flashpoint's configuration component. The
+## built-in copy already works, so a failure here is a log line, not an error.
+func _refresh_tag_filters() -> void:
+	if not await tag_filter.ensure():
+		_log("Tag filters: using the built-in lists (%s)" % tag_filter.last_error)
+		return
+	_paint_safe_chip()
+	_log("Tag filters refreshed from Flashpoint (%d groups)." % tag_filter.groups.size())
+
+
+## The archive pane lists filtered rows, so a change has to repaint it.
+func _reapply_filter() -> void:
+	if _archive == null:
+		return
+	_on_search()
+
+
+func _toggle_flash_first() -> void:
+	_flash_first = not _flash_first
+	_paint_flash_chip()
+	_save_config()
+	_log("Flash entries play in %s." % ("Flash Player" if _flash_first else "Ruffle"))
 
 
 func _toggle_authentic() -> void:
@@ -404,10 +572,15 @@ func _build_archive_column() -> Control:
 	filters.add_theme_constant_override("separation", 4)
 	box.add_child(filters)
 	_playlist = _facet_option(0)
+	## All Games, then the operator's own collection, then the curated ones.
 	for spec: Variant in Flashpoint.PLAYLISTS:
 		var rec: Dictionary = spec
-		_playlist.add_item(str(rec.get("title", rec.get("id", "?"))))
-		_playlist.set_item_metadata(_playlist.item_count - 1, str(rec.get("id", "")))
+		var id := str(rec.get("id", ""))
+		_playlist.add_item(str(rec.get("title", id if not id.is_empty() else "?")))
+		_playlist.set_item_metadata(_playlist.item_count - 1, id)
+		if id == "all":
+			_playlist.add_item(FAVORITES_TITLE)
+			_playlist.set_item_metadata(_playlist.item_count - 1, FAVORITES_ID)
 	_playlist.select(0)
 	_playlist.item_selected.connect(_on_playlist_selected)
 	filters.add_child(_playlist)
@@ -666,10 +839,14 @@ func _build_stage() -> Control:
 	box.add_child(actions)
 	_inscribe_btn = TempleTheme.primary_button("INSCRIBE", _on_inscribe)
 	_play_btn = TempleTheme.button("PLAY", _on_play)
+	_fav_btn = TempleTheme.button("FAVOURITE", _on_toggle_favorite)
 	_inscribe_btn.size_flags_horizontal = SIZE_EXPAND_FILL
 	_play_btn.size_flags_horizontal = SIZE_EXPAND_FILL
+	_fav_btn.custom_minimum_size = Vector2(132, 0)
 	actions.add_child(_inscribe_btn)
 	actions.add_child(_play_btn)
+	actions.add_child(_fav_btn)
+	_paint_fav_btn()
 	return panel
 
 
@@ -801,9 +978,12 @@ func _toggle_view() -> void:
 
 
 func _archive_label(rec: Dictionary) -> String:
+	## A star in front of the title, so a favourite is obvious while browsing
+	## the whole archive and not just inside the collection.
+	var star := "★ " if favorites.has(rec) else ""
 	if _view_grid:
-		return str(rec.get("title", "?"))
-	return _list_line(rec)
+		return star + str(rec.get("title", "?"))
+	return star + _list_line(rec)
 
 
 func _placeholder_icon() -> Texture2D:
@@ -880,6 +1060,9 @@ func _on_playlist_selected(index: int) -> void:
 		return
 	var id := str(_playlist.get_item_metadata(index))
 	_playlist_id = id if not id.is_empty() else "all"
+	## A new collection opens whole: the search and facets were aimed at the
+	## list we just left, and carrying them over hides most of this one.
+	_clear_filters()
 	_on_search()
 
 
@@ -1171,12 +1354,41 @@ func _refresh_catalog_background(library: String) -> void:
 	_warm_rows = fresh
 	if _still_all_games(library):
 		var keep := _archive_page
+		var row := _archive_row()
 		_show_search_hits(fresh, true)
 		_archive_page = keep
+		_archive_keep_row = row
 		_paint_archive_page()
 
 
+## Favourites are already on disk, so the collection opens without the network
+## and without the catalog — the point of keeping the row when it was marked.
+func _load_favorites(ticket: int) -> void:
+	_set_searching(true, "Loading  favourites")
+	var rows := favorites.rows_merged(_warm_rows if _still_all_games(_library_filter()) else [])
+	if ticket != _search_ticket:
+		return
+	_set_searching(false)
+	if rows.is_empty():
+		_archive_keep_row = -1
+		_set_busy(false)
+		_archive.clear()
+		_archive_hits = []
+		_archive_header.text = "ARCHIVE  ·  %s" % FAVORITES_TITLE
+		_archive_empty.visible = true
+		if _page_row:
+			_page_row.visible = false
+		var why := "No favourites yet. Pick a title and press FAVOURITE."
+		_set_job(why)
+		_log(why)
+		return
+	_show_search_hits(rows, true)
+
+
 func _load_playlist(ticket: int) -> void:
+	if _playlist_id == FAVORITES_ID:
+		await _load_favorites(ticket)
+		return
 	var title := _playlist_title()
 	_set_searching(true, "Loading  %s" % title)
 	_log("Playlist %s…" % title)
@@ -1286,13 +1498,19 @@ func _still_all_games(library: String) -> bool:
 func _show_search_hits(hits: Array, already_sorted: bool = false) -> void:
 	_set_searching(false)
 	_set_busy(false)
+	var before := hits.size()
+	hits = tag_filter.apply(hits)
+	var hidden := before - hits.size()
 	hits = _filter_browse(hits)
 	if not already_sorted and hits.size() <= 8000:
 		Flashpoint.sort_titles(hits)
 	_archive_hits = hits
 	_archive_page = 0
 	if hits.is_empty():
+		_archive_keep_row = -1
 		var why := flashpoint.last_error if not flashpoint.last_error.is_empty() else "Nothing matched."
+		if hidden > 0:
+			why = "All %d matches are hidden by tag filters." % hidden
 		_archive.clear()
 		_archive_header.text = "ARCHIVE"
 		_archive_empty.visible = true
@@ -1302,12 +1520,18 @@ func _show_search_hits(hits: Array, already_sorted: bool = false) -> void:
 		_log(why)
 		return
 	_paint_archive_page()
-	_set_job("%d titles." % hits.size())
-	_log("%d titles." % hits.size())
+	var line := "%d titles." % hits.size()
+	if hidden > 0:
+		line += "  %d hidden by tag filters." % hidden
+	_set_job(line)
+	_log(line)
 	_harvest_facets(hits)
 
 
 func _paint_archive_page() -> void:
+	## Consumed here so a stale request cannot leak into the next repaint.
+	var keep := _archive_keep_row
+	_archive_keep_row = -1
 	var total := _archive_hits.size()
 	var pages := maxi(1, ceili(float(total) / float(PAGE_SIZE)))
 	_archive_page = clampi(_archive_page, 0, pages - 1)
@@ -1353,8 +1577,13 @@ func _paint_archive_page() -> void:
 			_next_page_btn.disabled = _archive_page >= pages - 1
 	_load_archive_logos()
 	if _archive.item_count > 0:
-		_archive.select(0)
-		_on_archive_selected(0)
+		## Landing on the row we were already on: a repaint the operator did not
+		## ask for — marking a favourite, a catalog refresh — should not throw
+		## them back to the top of the list.
+		var row := 0 if keep < 0 else clampi(keep, 0, _archive.item_count - 1)
+		_archive.select(row)
+		_archive.ensure_current_is_visible()
+		_on_archive_selected(row)
 
 
 func _on_prev_page() -> void:
@@ -1741,13 +1970,14 @@ func _clear_box(box: Container) -> void:
 		child.free()
 
 
-func _search_facet(kind: String, value: String) -> void:
-	var v := value.strip_edges()
+## Every narrowing control at once. A filter belongs to the list it was typed
+## against, so opening a different collection — or jumping to a facet — starts
+## from the whole thing instead of inheriting the last search.
+func _clear_filters() -> void:
 	_sel_dev = ""
 	_sel_pub = ""
 	_sel_series = ""
 	_sel_tag = ""
-	_select_playlist("all")
 	if _filter_dev:
 		_filter_dev.set_value("")
 	if _filter_pub:
@@ -1761,6 +1991,12 @@ func _search_facet(kind: String, value: String) -> void:
 	if not _browse_letter.is_empty():
 		_browse_letter = ""
 		_paint_letters()
+
+
+func _search_facet(kind: String, value: String) -> void:
+	var v := value.strip_edges()
+	_clear_filters()
+	_select_playlist("all")
 	match kind:
 		"dev":
 			_sel_dev = v
@@ -1819,6 +2055,7 @@ func _load_shot(uuid: String) -> void:
 
 
 func _refresh_detail_actions() -> void:
+	_paint_fav_btn()
 	var can_write := iq != null and iq.is_available() and kindled and not _busy
 	var archive_pick := _selected_kind == "archive"
 	var inscribed_pick := _selected_kind == "inscribed"
@@ -2116,16 +2353,41 @@ func _refresh_spr_chip() -> void:
 		)
 	else:
 		TempleTheme.paint_chip(_spr_label, "SPR  —", TempleTheme.AMBER)
+	_paint_flash_chip()
 	_refresh_nav_chip()
 
 
+## Flashpoint opens pages in its own Navigator; ours can instead hand them to
+## the installed browser, which is newer but is not what the archive expects.
 func _refresh_nav_chip() -> void:
-	if _nav_label == null:
+	if _nav_btn == null:
 		return
-	if packs != null and packs.has_navigator():
-		TempleTheme.paint_chip(_nav_label, "NAV  OK", TempleTheme.GREEN)
-	else:
-		TempleTheme.paint_chip(_nav_label, "NAV  —", TempleTheme.AMBER)
+	var installed := packs != null and packs.has_navigator()
+	var colour := TempleTheme.CYAN
+	if _page_in_navigator:
+		colour = TempleTheme.GREEN if installed else TempleTheme.AMBER
+	_nav_btn.text = "NAV  FLASHPOINT" if _page_in_navigator else "NAV  BROWSER"
+	_nav_btn.tooltip_text = (
+		"Pages open in Flashpoint Navigator, the way Flashpoint opens them. Fetched on first use (58 MB). Click to use this machine's browser."
+		if _page_in_navigator
+		else "Pages open in the installed browser. Newer engine, but not the one the archive was curated against. Click for Flashpoint Navigator."
+	)
+	_nav_btn.add_theme_color_override("font_color", colour)
+	_nav_btn.add_theme_color_override("font_hover_color", TempleTheme.BLACK)
+	_nav_btn.add_theme_color_override("font_pressed_color", TempleTheme.BLACK)
+	_nav_btn.add_theme_stylebox_override("normal", TempleTheme.chip_box(colour))
+	_nav_btn.add_theme_stylebox_override("hover", TempleTheme.chip_box(TempleTheme.WHITE))
+	_nav_btn.add_theme_stylebox_override("pressed", TempleTheme.chip_box(TempleTheme.YELLOW))
+
+
+func _toggle_page_host() -> void:
+	_page_in_navigator = not _page_in_navigator
+	_refresh_nav_chip()
+	_save_config()
+	_log(
+		"Pages open in %s."
+		% ("Flashpoint Navigator" if _page_in_navigator else "the installed browser")
+	)
 
 
 func _launch_via_flashpoint(entry: Dictionary, trial: bool) -> bool:
@@ -2266,11 +2528,10 @@ func _launch_via_navigator(
 	dest: String,
 	meta: Dictionary,
 	trial: bool,
-	_file: String,
+	file: String,
 	_inject_ruffle: bool,
 	_plugin: bool
 ) -> void:
-	TempleTheme.paint_chip(_nav_label, "NAV  …", TempleTheme.AMBER)
 	var ok := await packs.ensure_for(
 		meta,
 		_on_progress,
@@ -2281,14 +2542,28 @@ func _launch_via_navigator(
 	if not ok:
 		_log(packs.last_error)
 		_set_busy(false)
+		## A page still renders without the pack — our own server, plus Ruffle
+		## for any Flash in it. Only a real plugin needs a Flashpoint install.
+		if FlashpointHost.page_entry(meta):
+			await _launch_via_local_html(dest, meta, trial, file, true)
+			return
 		await _launch_via_flashpoint(meta, trial)
 		return
 	var launch := str(meta.get("launch", meta.get("launchCommand", "")))
-	var port := httpd.serve(_serve_root(dest), LocalHttp.PLUGIN_PORT, Flashpoint.LEGACY_HTDOCS)
+	## Navigator ships pointed at Flashpoint's proxy port, so bind that one.
+	## ShiVa is the exception: its SecurePlayer rewrites archived URLs onto the
+	## plugin port instead, and asks for them there.
+	var prefer := (
+		LocalHttp.PLUGIN_PORT if Packs.wants_plugin_port(meta) else LocalHttp.SPR_PORT
+	)
+	var port := httpd.serve(_serve_root(dest), prefer, Flashpoint.LEGACY_HTDOCS)
 	if port < 0:
 		_set_busy(false)
 		_set_job("Could not start local HTTP.")
 		return
+	## Navigator's own fetches for archived absolute URLs come back to us.
+	if not packs.configure_proxy(port):
+		_log(packs.last_error)
 	var rel := Unzip.resolved_rel(dest, launch)
 	if rel.is_empty():
 		rel = Unzip.path_from_launch(launch)
@@ -2314,6 +2589,44 @@ func _launch_via_navigator(
 	else:
 		_set_job("%s (%s)%s." % [tag, Flashpoint.platform_label(meta), " — not inscribed" if trial else ""])
 		_log("%s pid %d — %s" % [tag, pid, local_movie if not local_movie.is_empty() else original])
+
+
+## Flashpoint's own path for a Flash entry: the projector its applicationPath
+## names, pointed at our loopback server the way FlashpointProxy expects.
+## Returns false when the runtime is not there, so Play falls back to Ruffle.
+func _launch_via_flash(dest: String, meta: Dictionary, trial: bool) -> bool:
+	var launch := str(meta.get("launch", meta.get("launchCommand", "")))
+	var movie := Flash.movie_for(dest, launch)
+	if movie.is_empty():
+		return false
+	if not flash.has_runtime():
+		_set_job("Fetching Flash player…")
+	var ok := await flash.ensure(_on_progress, _recover_download)
+	_paint_flash_chip()
+	if not ok:
+		_log(flash.last_error)
+		return false
+	var port := httpd.serve(_serve_root(dest), LocalHttp.SPR_PORT, Flashpoint.LEGACY_HTDOCS)
+	if port < 0:
+		_log("Could not start local HTTP for Flash.")
+		return false
+	if not flash.configure_proxy(port):
+		_log(flash.last_error)
+		return false
+	var oc := await _prepare_throttle(meta)
+	var pid := flash.play(meta, movie, _throttle_mhz(meta) if not oc.is_empty() else 0, oc)
+	if pid == -1:
+		_log("Flash failed: %s" % flash.last_error)
+		return false
+	await _await_player_window()
+	_set_busy(false)
+	var tag := "Trial" if trial else "Play"
+	_set_job("%s in Flash Player%s." % [tag, " — not inscribed" if trial else ""])
+	_log(
+		"%s Flash %s pid %d proxy %d — %s"
+		% [tag, Flash.projector_name(meta), pid, port, movie]
+	)
+	return true
 
 
 func _launch_via_ruffle(dest: String, meta: Dictionary, trial: bool, file: String) -> void:
@@ -2451,11 +2764,17 @@ func _launch_entry(dest: String, meta: Dictionary, trial: bool) -> void:
 	if FlashpointHost.needs_shockwave(meta):
 		await _launch_via_spr(dest, meta, trial)
 		return
-	if FlashpointHost.needs_flashpoint(meta):
-		await _launch_via_navigator(dest, meta, trial, "", false, true)
-		return
 	var file := Unzip.file_for_launch(dest, launch)
 	var swf := Unzip.swf_for_launch(dest, launch)
+	if FlashpointHost.needs_flashpoint(meta):
+		## Flashpoint's answer is always Navigator. For a plain page the operator
+		## may prefer a modern engine; anything with a plugin in it has no
+		## alternative, so the toggle does not apply.
+		if _page_in_navigator or not FlashpointHost.page_entry(meta):
+			await _launch_via_navigator(dest, meta, trial, file, false, true)
+			return
+		await _launch_via_local_html(dest, meta, trial, file, true)
+		return
 	if file.is_empty() and swf.is_empty():
 		_set_busy(false)
 		_set_job("No launch file in that cartridge.")
@@ -2467,6 +2786,12 @@ func _launch_entry(dest: String, meta: Dictionary, trial: bool) -> void:
 		or launch.to_lower().find(".html") >= 0
 		or launch.to_lower().find(".htm") >= 0
 	)
+	## Flashpoint's default. The projector only takes a movie, so an entry whose
+	## launch is a page still goes through the browser path below.
+	if _flash_first and not html_launch and not swf.is_empty() and Flash.projector_entry(meta):
+		if await _launch_via_flash(dest, meta, trial):
+			return
+		_log("Flash player unavailable — falling back to Ruffle.")
 	if html_launch:
 		var flash_html := str(meta.get("platform", "")).to_lower().find("flash") >= 0
 		if flash_html:
@@ -2488,6 +2813,74 @@ func _launch_entry(dest: String, meta: Dictionary, trial: bool) -> void:
 	var tag := "Trial" if trial else "Play"
 	_set_job("%s via system open (%s)." % [tag, Flashpoint.platform_label(meta)])
 	_log("%s opened %s" % [tag, file])
+
+
+## Favouriting is free and local: no download, no chain write, no confirmation.
+func _on_toggle_favorite() -> void:
+	var entry := _favorite_subject()
+	if entry.is_empty():
+		_log("Pick a title to favourite.")
+		return
+	var now := favorites.toggle(entry)
+	_paint_fav_btn()
+	var title := str(entry.get("title", "this title"))
+	_set_job("%s %s favourites." % [title, "added to" if now else "removed from"])
+	_log("%s %s favourites (%d held)." % [title, "★" if now else "removed from", favorites.size()])
+	## Show the marker without disturbing the browse. Inside the collection the
+	## row has to go, so the list is rebuilt — but we come back to the same place
+	## in it rather than to the top.
+	if _playlist_id == FAVORITES_ID:
+		_archive_keep_row = _archive_row()
+		_on_search()
+	else:
+		_repaint_archive_row(Favorites.uuid_of(entry))
+
+
+## The row the archive list is sitting on, or -1 if it is sitting on none.
+func _archive_row() -> int:
+	if _archive == null:
+		return -1
+	var picked := _archive.get_selected_items()
+	return -1 if picked.is_empty() else picked[0]
+
+
+## Relabel one row in place. Starring a title changes nothing about the list it
+## is in, so there is no reason to rebuild the page and lose where we were.
+func _repaint_archive_row(uuid: String) -> void:
+	if _archive == null or uuid.is_empty():
+		return
+	for i in _archive.item_count:
+		var rec: Variant = _archive.get_item_metadata(i)
+		if rec is Dictionary and Favorites.uuid_of(rec) == uuid:
+			_archive.set_item_text(i, _archive_label(rec))
+			return
+
+
+## The archive row if one is selected, else the inscribed cartridge on stage.
+func _favorite_subject() -> Dictionary:
+	if _selected_entry.is_empty():
+		return {}
+	var entry := _selected_entry.duplicate()
+	if Favorites.uuid_of(entry).is_empty():
+		return {}
+	return entry
+
+
+func _paint_fav_btn() -> void:
+	if _fav_btn == null:
+		return
+	var entry := _favorite_subject()
+	var on := not entry.is_empty() and favorites.has(entry)
+	_fav_btn.disabled = entry.is_empty()
+	_fav_btn.text = "★ FAVOURITE" if on else "FAVOURITE"
+	_fav_btn.tooltip_text = (
+		"In your favourites. Click to remove."
+		if on
+		else "Keep a local bookmark to this title. Costs nothing and writes nothing to the chain."
+	)
+	_fav_btn.add_theme_color_override(
+		"font_color", TempleTheme.YELLOW if on else TempleTheme.GREY
+	)
 
 
 func _refresh_inscribed() -> void:
@@ -3128,6 +3521,12 @@ func _load_config() -> void:
 			_view_grid = bool((parsed as Dictionary).get("view_grid", true))
 		if (parsed as Dictionary).has("authentic"):
 			_authentic = bool((parsed as Dictionary).get("authentic", true))
+		if (parsed as Dictionary).has("flash_first"):
+			_flash_first = bool((parsed as Dictionary).get("flash_first", true))
+		if (parsed as Dictionary).has("page_in_navigator"):
+			_page_in_navigator = bool((parsed as Dictionary).get("page_in_navigator", true))
+		if (parsed as Dictionary).has("tag_filter"):
+			tag_filter.from_config((parsed as Dictionary).get("tag_filter", null))
 	if fp_host.root.is_empty():
 		fp_host.autodetect()
 
@@ -3142,6 +3541,9 @@ func _save_config() -> void:
 			"flashpoint_root": fp_host.root,
 			"view_grid": _view_grid,
 			"authentic": _authentic,
+			"flash_first": _flash_first,
+			"page_in_navigator": _page_in_navigator,
+			"tag_filter": tag_filter.to_config(),
 		})
 	)
 	file.close()

@@ -409,7 +409,12 @@ static func format_bytes(n: int) -> String:
 	return "%.2f MB" % (float(n) / (1024.0 * 1024.0))
 
 
-func download_zip(uuid: String, dest: String, progress: Callable = Callable()) -> bool:
+func download_zip(
+	uuid: String,
+	dest: String,
+	progress: Callable = Callable(),
+	timeout_sec: float = 0.0
+) -> bool:
 	last_error = ""
 	var id := uuid.strip_edges()
 	if id.is_empty():
@@ -419,7 +424,7 @@ func download_zip(uuid: String, dest: String, progress: Callable = Callable()) -
 	var url := "%s/get?id=%s" % [API, id.uri_encode()]
 	var http := HTTPRequest.new()
 	add_child(http)
-	http.timeout = 0
+	http.timeout = timeout_sec
 	http.download_file = dest
 	var ticker := Timer.new()
 	ticker.wait_time = 0.4
@@ -454,7 +459,12 @@ func download_zip(uuid: String, dest: String, progress: Callable = Callable()) -
 
 
 ## Infinity-style: pull the launch file from Legacy/htdocs into dest/{host/path}.
-func fetch_legacy(launch: String, dest_dir: String, progress: Callable = Callable()) -> String:
+func fetch_legacy(
+	launch: String,
+	dest_dir: String,
+	progress: Callable = Callable(),
+	timeout_sec: float = 0.0
+) -> String:
 	last_error = ""
 	var rel := Unzip.path_from_launch(launch)
 	if rel.contains("?"):
@@ -469,7 +479,7 @@ func fetch_legacy(launch: String, dest_dir: String, progress: Callable = Callabl
 	var url := legacy_url(launch)
 	var http := HTTPRequest.new()
 	add_child(http)
-	http.timeout = 0
+	http.timeout = timeout_sec
 	http.download_file = dest
 	var err := http.request(url, PackedStringArray(["User-Agent: %s" % UA]))
 	if err != OK:

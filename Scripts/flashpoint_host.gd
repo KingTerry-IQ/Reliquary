@@ -124,6 +124,12 @@ static func needs_flashpoint(entry: Dictionary) -> bool:
 		return true
 	if app.find("netscape") >= 0 or app.find("basilisk") >= 0:
 		return true
+	## An entry whose applicationPath names the browser is a page, and Flashpoint
+	## opens pages in Navigator — for HTML5 as much as for plugin-in-page Flash.
+	## Whether we follow it there is the operator's call; this only reports what
+	## Flashpoint would do.
+	if app.find("fpnavigator") >= 0:
+		return true
 	var movie := Unzip.movie_url(launch)
 	if not movie.is_empty():
 		var idx := launch.find(movie)
@@ -134,6 +140,16 @@ static func needs_flashpoint(entry: Dictionary) -> bool:
 	if _plays_in_ruffle_or_html(plat):
 		return false
 	return not plat.strip_edges().is_empty()
+
+
+## A page we could equally well open in an ordinary browser, if the operator
+## would rather have a modern engine than Flashpoint's.
+static func page_entry(entry: Dictionary) -> bool:
+	var plat := str(entry.get("platform", "")).to_lower()
+	if plat.find("flash") >= 0 or plat.find("html") >= 0:
+		return true
+	var launch := str(entry.get("launch", entry.get("launchCommand", ""))).to_lower()
+	return launch.find(".htm") >= 0
 
 
 ## Flash and HTML5 we host ourselves. "HTML+TIME" is a plugin, not HTML5.
